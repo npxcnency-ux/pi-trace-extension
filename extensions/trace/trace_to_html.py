@@ -34,6 +34,151 @@ def fmt_money(x):
     return f"${x:.3f}"
 
 
+def _build_subagent_subtree(messages, parent_id):
+    """Rebuild subagent messages into llm-generation/tool child nodes."""
+    if not isinstance(messages, list) or not messages:
+        return []
+
+    pending_results = [
+        m for m in messages
+        if isinstance(m, dict) and m.get("role") == "toolResult"
+    ]
+    pending_results.reverse()
+
+    out = []
+    step_seq = 0
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+
+        text_parts = []
+        thinking_parts = []
+        tool_calls = []
+        thinking_redacted = False
+        thinking_source = None
+
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type == "text":
+                text_parts.append(part.get("text") or "")
+            elif part_type == "thinking":
+                thinking_text = part.get("text") or part.get("thinking") or ""
+                if thinking_text:
+                    thinking_parts.append(thinking_text)
+                    thinking_source = thinking_source or part.get("source") or "message"
+            elif part_type == "redacted_thinking":
+                thinking_redacted = True
+                thinking_source = thinking_source or "redacted_thinking"
+            elif part_type == "tool_call":
+                tool_calls.append(part)
+
+        step_seq += 1
+        ts = m.get("timestamp")
+        usage = m.get("usage") or {}
+        thinking = "\n".join(t for t in thinking_parts if t) or None
+        step_node = {
+            "id": f"{parent_id}-llm-{step_seq}",
+            "parent_id": parent_id,
+            "type": "step",
+            "name": "llm-generation",
+            "icon": "🧠",
+            "start": ts,
+            "end": ts,
+            "status": "ok",
+            "data": {
+                "stepIndex": step_seq,
+                "thinking": thinking,
+                "thinkingRedacted": thinking_redacted or None,
+                "thinkingSource": thinking_source,
+                "text": "\n".join(text_parts) or None,
+                "toolCalls": [
+                    {"id": tc.get("id"), "name": tc.get("name"), "args": tc.get("input")}
+                    for tc in tool_calls
+                ],
+                "usage": usage if usage else None,
+                "stopReason": None,
+                "errorMessage": None,
+                "model": None,
+                "input": None,
+                "_subagentDerived": True,
+            },
+            "children": [],
+        }
+        out.append(step_node)
+
+        for tc in tool_calls:
+            tr_msg = pending_results.pop() if pending_results else None
+            tr_ts = tr_msg.get("timestamp") if tr_msg else ts
+            result_text = ""
+            if tr_msg:
+                result_content = tr_msg.get("content")
+                if isinstance(result_content, list):
+                    parts_txt = []
+                    for item in result_content:
+                        if isinstance(item, str):
+                            parts_txt.append(item)
+                        elif isinstance(item, dict) and item.get("type") == "text":
+                            parts_txt.append(item.get("text") or "")
+                    result_text = "\n".join(parts_txt)
+                elif isinstance(result_content, str):
+                    result_text = result_content
+
+            tcid = tc.get("id")
+            tool_node = {
+                "id": f"{parent_id}-tool-{tcid or step_seq}-{len(out)}",
+                "parent_id": parent_id,
+                "type": "tool",
+                "name": tc.get("name") or "tool",
+                "icon": "🔧",
+                "start": ts,
+                "end": tr_ts,
+                "status": "ok",
+                "data": {
+                    "toolName": tc.get("name"),
+                    "toolCallId": tcid,
+                    "args": tc.get("input"),
+                    "resultPreview": result_text or None,
+                    "resultTotalLength": len(result_text) if result_text else None,
+                    "isError": None,
+                    "stepIndex": step_seq,
+                    "subagent": None,
+                    "_subagentDerived": True,
+                },
+                "children": [],
+            }
+            out.append(tool_node)
+    return out
+
+
+def _extract_subagent_failures(result_preview):
+    """Extract per-subagent failure messages from a subagent tool result."""
+    out = {}
+    if not isinstance(result_preview, str):
+        return out
+
+    text = result_preview
+    try:
+        parsed = json.loads(result_preview)
+        if isinstance(parsed, dict):
+            content = parsed.get("content") or []
+            if content and isinstance(content[0], dict) and content[0].get("type") == "text":
+                text = content[0].get("text", "") or text
+    except Exception:
+        text = result_preview.replace("\\n", "\n").replace('\\"', '"')
+
+    pattern = re.compile(r"###\s*\[([^\]]+)\]\s*failed\s*\n\s*(.*?)(?=\n\s*(?:###|---)|\Z)", re.DOTALL)
+    for idx, match in enumerate(pattern.finditer(text)):
+        name = match.group(1).strip()
+        msg = match.group(2).strip()
+        out.setdefault(name, msg)
+        out[f"_idx_{idx}"] = msg
+    return out
+
 def build_tree(events):
     interactions = []
     turns = {}     # 复合 key: (epoch, iid, turn_seq) -> turn node。turn_seq 是该 interaction 内 turn 的出现序号
@@ -220,9 +365,31 @@ def build_tree(events):
                 sub = e.get("subagent")
                 if sub:
                     d["subagent"] = sub
-                    tn["icon"] = {"single":"🤖","parallel":"🔀","chain":"⛓️"}.get(sub.get("mode"), "🤖")
-                    for idx, sr in enumerate(sub.get("results", []) or [], 1):
-                        is_err = (sr.get("exitCode") not in (0, None)) or sr.get("stopReason") in ("error","aborted") or sr.get("errorMessage")
+                    mode = sub.get("mode") or "single"
+                    tn["icon"] = {"single":"🤖","parallel":"🔀","chain":"⛓️"}.get(mode, "🤖")
+                    sub_results = sub.get("results", []) or []
+                    # 从 resultPreview 里挑出每个失败子 agent 的错误文本，作为 errorMessage 回填
+                    # pi 的 subagent 输出格式：### [agent] failed\n\n<msg>\n\n---\n\n
+                    failure_msgs = _extract_subagent_failures(d.get("resultPreview"))
+                    # 给外层 subagent 节点更友好的名字
+                    if mode == "single" and sub_results:
+                        tn["name"] = f"subagent → {sub_results[0].get('agent') or '?'}"
+                    elif mode in ("parallel", "chain"):
+                        tn["name"] = f"subagent[{mode}×{len(sub_results)}]"
+                    # 子 agent 中只要有一个失败，外层节点也标红
+                    any_sub_err = False
+                    for idx, sr in enumerate(sub_results, 1):
+                        # 多重判定：exitCode != 0、stopReason 是 error/aborted、原 errorMessage 非空、或 resultPreview 抽出的失败信息
+                        agent_name = sr.get("agent") or f"subagent-{idx}"
+                        msg_from_preview = failure_msgs.get(agent_name) or failure_msgs.get(f"_idx_{idx-1}")
+                        is_err = (
+                            (sr.get("exitCode") not in (0, None))
+                            or sr.get("stopReason") in ("error", "aborted")
+                            or bool(sr.get("errorMessage"))
+                            or bool(msg_from_preview)
+                        )
+                        if is_err:
+                            any_sub_err = True
                         sn = {
                             "id": f"{tn['id']}-sub-{idx}", "parent_id": tn["id"],
                             "type": "subagent-result",
@@ -234,14 +401,21 @@ def build_tree(events):
                                 "agent": sr.get("agent"), "agentSource": sr.get("agentSource"),
                                 "task": sr.get("task"), "model": sr.get("model"),
                                 "exitCode": sr.get("exitCode"), "stopReason": sr.get("stopReason"),
-                                "errorMessage": sr.get("errorMessage"),
+                                "errorMessage": sr.get("errorMessage") or msg_from_preview,
                                 "finalOutput": sr.get("finalOutput"),
                                 "usage": sr.get("usage"), "toolsUsed": sr.get("toolsUsed"),
                                 "step": sr.get("step"),
                             },
                             "children": [],
                         }
+                        # 把子 agent 的 messages 重建成 step + tool 子节点
+                        sub_messages = sr.get("messages")
+                        if sub_messages:
+                            sn["children"] = _build_subagent_subtree(sub_messages, sn["id"])
                         tn["children"].append(sn)
+                    # 外层 subagent 节点状态：任一子 agent 失败就染红
+                    if any_sub_err:
+                        tn["status"] = "error"
         elif t == "turn_end":
             if cur_turn_key and cur_turn_key in turns:
                 turns[cur_turn_key]["end"] = ts

@@ -2,7 +2,12 @@ const TRACE_DATA = /*__DATA__*/null;
 const DAG_STATS = /*__DAG__*/null;
 
 function fmtMs(ms) { if (ms == null) return ""; if (ms < 1000) return ms + "ms"; const s = ms/1000; if (s < 60) return s.toFixed(2)+"s"; const m = Math.floor(s/60); return m+"m "+Math.round(s-m*60)+"s"; }
-function fmtMoney(x) { if (!x) return "$0"; if (x < 0.01) return "$"+x.toFixed(4); return "$"+x.toFixed(3); }
+function fmtMoney(x) {
+  if (x && typeof x === "object") x = x.total ?? x.value ?? 0;
+  if (typeof x !== "number" || !x) return "$0";
+  if (x < 0.01) return "$"+x.toFixed(4);
+  return "$"+x.toFixed(3);
+}
 function fmtInt(n) { if (n == null) return "0"; return Number(n).toLocaleString(); }
 function fmtIso(ms) { if (!ms) return ""; const d = new Date(ms); const p=(n,w)=>String(n).padStart(w||2,"0"); return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())+"."+p(d.getMilliseconds(),3); }
 
@@ -15,10 +20,27 @@ const NODE_INDEX = {};
 
 function nodeStatusClass(n) { return "status-" + (n.status || "ok"); }
 
+function nodeTotalTokens(n) {
+  if (n.type === "session") return 0;
+  const d = n.data || {};
+  const u = d.usage || d.totalUsage;
+  if (!u) return 0;
+  return (u.input || 0) + (u.cacheRead || 0) + (u.output || 0);
+}
+
+function fmtTokens(n) {
+  if (!n || n < 1) return "";
+  if (n < 1000) return "~" + n + " tok";
+  if (n < 10000) return "~" + (n / 1000).toFixed(1) + "k tok";
+  return "~" + Math.round(n / 1000) + "k tok";
+}
+
 function renderNodeRow(n, depth) {
   const hasChildren = (n.children && n.children.length > 0);
   const statusIcon = n.status === "error" ? "❌" : (n.status === "aborted" ? "⏹" : (n.status === "in_progress" ? "⏳" : (n.icon || "·")));
   const dur = n.duration_ms != null ? fmtMs(n.duration_ms) : "";
+  const totalTok = nodeTotalTokens(n);
+  const tokStr = totalTok >= 1000 ? fmtTokens(totalTok) : "";
   const wrap = el("div");
   const row = el("div", "node-row " + nodeStatusClass(n) + (hasChildren ? "" : " leaf"));
   row.dataset.nodeId = n.id;
@@ -28,8 +50,9 @@ function renderNodeRow(n, depth) {
   const ic = el("span", "node-icon", statusIcon);
   const nm = el("span", "node-name", n.name || "");
   nm.title = n.name || "";
+  const tk = el("span", "node-tokens", tokStr);
   const du = el("span", "node-duration", dur);
-  row.appendChild(tog); row.appendChild(ic); row.appendChild(nm); row.appendChild(du);
+  row.appendChild(tog); row.appendChild(ic); row.appendChild(nm); row.appendChild(tk); row.appendChild(du);
   wrap.appendChild(row);
 
   if (hasChildren) {
@@ -394,6 +417,10 @@ function renderDetail(node) {
     section("metadata", "Metadata", renderJsonRoot({
       stepIndex: d.stepIndex, turnIndex: d.turnIndex,
       stopReason: d.stopReason, llm_status: d.llm_status, usage: d.usage,
+      thinkingSource: d.thinkingSource,
+      thinkingDeltaCount: d.thinkingDeltaCount,
+      thinkingRedacted: d.thinkingRedacted,
+      subagentDerived: d._subagentDerived,
     }));
   } else if (t === "tool") {
     const d = node.data;

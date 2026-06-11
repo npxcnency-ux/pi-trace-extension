@@ -62,6 +62,13 @@ export default function (pi: ExtensionAPI) {
 	let stepStartTime = 0;
 	let providerRequestStart = 0;
 
+	// message_update 流式事件里可能有明文 thinking，但最终 message_end 可能只剩签名。
+	// 按 step 缓存一次，message_end 时回填到 step_end。
+	let streamThinkingStep = 0;
+	let streamThinking = "";
+	let streamThinkingRedacted = false;
+	let streamThinkingDeltaCount = 0;
+
 	// “Interaction” = 一次用户输入到 agent 完成任务的完整过程
 	// 可能跨多个 pi turn（pi 的 turn 按 LLM 调用拆分）
 	let interactionId = 0;
@@ -85,6 +92,8 @@ export default function (pi: ExtensionAPI) {
 		thinkingRedacted?: boolean;
 		text?: string;
 		toolCalls?: Array<{ name: string; args: unknown }>;
+		thinkingSource?: "message" | "stream";
+		thinkingDeltaCount?: number;
 	}> = [];
 
 	const writeEvent = (event: TraceEvent) => {
@@ -109,10 +118,11 @@ export default function (pi: ExtensionAPI) {
 
 	const extractParts = (message: any): {
 		thinking: string;
+		thinkingRedacted: boolean;
 		text: string;
 		toolCalls: Array<{ id: string; name: string; args: unknown }>;
 	} => {
-		const out = { thinking: "", text: "", toolCalls: [] as any[] };
+		const out = { thinking: "", thinkingRedacted: false, text: "", toolCalls: [] as any[] };
 		const content = message?.content;
 		if (!Array.isArray(content)) return out;
 
@@ -122,8 +132,17 @@ export default function (pi: ExtensionAPI) {
 		for (const part of content) {
 			if (!part || typeof part !== "object") continue;
 			const t = part.type;
-			if (t === "think" || t === "thinking") {
-				thinkingParts.push(part.think ?? part.thinking ?? "");
+			if (t === "think" || t === "thinking" || t === "redacted_thinking") {
+				const thinking = part.text ?? part.think ?? part.thinking ?? "";
+				if (thinking) thinkingParts.push(thinking);
+
+				// Some Claude/Bedrock responses only expose an encrypted/signature payload.
+				// The trace can show that thinking happened, but cannot recover plaintext.
+				const hasSignature = typeof part.thinkingSignature === "string" && part.thinkingSignature.trim().length > 0;
+				const hasRedactedPayload = typeof part.data === "string" && part.data.trim().length > 0;
+				if (part.redacted || t === "redacted_thinking" || (!thinking && (hasSignature || hasRedactedPayload))) {
+					out.thinkingRedacted = true;
+				}
 			} else if (t === "text") {
 				textParts.push(part.text ?? "");
 			} else if (t === "toolCall" || t === "tool_call" || t === "tool_use") {
@@ -206,8 +225,16 @@ export default function (pi: ExtensionAPI) {
 						is_error: p.is_error ?? p.isError,
 					};
 				}
-				if (pt === "thinking" || pt === "think") {
-					return { type: "thinking", text: truncStr(p.text ?? p.thinking ?? p.think) };
+				if (pt === "thinking" || pt === "think" || pt === "redacted_thinking") {
+					const thinking = p.text ?? p.thinking ?? p.think;
+					const hasSignature = typeof p.thinkingSignature === "string" && p.thinkingSignature.trim().length > 0;
+					const hasRedactedPayload = typeof p.data === "string" && p.data.trim().length > 0;
+					const outPart: any = { type: "thinking" };
+					if (thinking) outPart.text = truncStr(thinking);
+					if (p.redacted || pt === "redacted_thinking" || (!thinking && (hasSignature || hasRedactedPayload))) {
+						outPart.redacted = true;
+					}
+					return outPart;
 				}
 				return p;
 			});
@@ -219,6 +246,10 @@ export default function (pi: ExtensionAPI) {
 		if (m.tool_calls) out.tool_calls = m.tool_calls;
 		if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
 		if (m.name) out.name = m.name;
+		// 透传 timestamp（pi 在 message 上记录了，给 trace 重建子 agent 时间轴用）
+		if (m.timestamp) out.timestamp = m.timestamp;
+		// 单条 message 的 usage（如果有），按 step 拆 token 用
+		if (m.usage) out.usage = m.usage;
 		return out;
 	};
 
@@ -307,21 +338,18 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (event, ctx) => {
 		const ev = event as any;
-		// 使用 pi 官方的 session ID（跟 session jsonl 文件名一致）
-		// 优先从 sessionFile 提取完整文件名（带时间戳前缀），这样在文件系统里能按时间排序
-		let derivedId: string | undefined;
-		try {
-			const sessionFile = ctx.sessionManager?.getSessionFile?.();
-			if (sessionFile) {
-				// 从路径抽出文件名（不带 .jsonl）
-				const base = path.basename(sessionFile, ".jsonl");
-				derivedId = base;
-			} else {
-				derivedId = ctx.sessionManager?.getSessionId?.();
-			}
-		} catch {
-			// ignore
+		// 检测是否为 subagent 进程：subagent 没有真正的 session.jsonl 文件
+		// 父 trace 已经在 subagent 工具调用里完整嵌套了子任务的输入/输出/工具列表，
+		// 这边再独立写一份 trace 会污染 ~/.pi/agent/traces/ 目录且数据冗余。
+		const sessionFile = ctx.sessionManager?.getSessionFile?.();
+		if (!sessionFile) {
+			// 静默跳过，不打日志（subagent 一启动就会发出，避免刷屏）
+			return;
 		}
+
+		// 使用 pi 官方的 session ID（跟 session jsonl 文件名一致）
+		// sessionFile 路径里有完整文件名（带时间戳前缀），这样在文件系统里能按时间排序
+		const derivedId = path.basename(sessionFile, ".jsonl");
 		sessionId = derivedId || ev.sessionId || `${Date.now()}`;
 
 		sessionDir = path.join(TRACE_DIR, sessionId);
@@ -333,7 +361,7 @@ export default function (pi: ExtensionAPI) {
 			type: "session_start",
 			cwd: ctx.cwd,
 			reason: ev.reason,
-			sessionFile: ctx.sessionManager?.getSessionFile?.(),
+			sessionFile,
 			model: ev.model,
 		}));
 	});
@@ -544,6 +572,10 @@ export default function (pi: ExtensionAPI) {
 		stepStartTime = Date.now();
 		providerRequestStart = stepStartTime;
 		currentStep += 1;
+		streamThinkingStep = currentStep;
+		streamThinking = "";
+		streamThinkingRedacted = false;
+		streamThinkingDeltaCount = 0;
 
 		writeEvent(baseEvent({
 			ts: stepStartTime,
@@ -562,6 +594,7 @@ export default function (pi: ExtensionAPI) {
 			type: "llm_request",
 			input: inputPayload,
 		}));
+
 	});
 
 	pi.on("after_provider_response", (event) => {
@@ -577,12 +610,62 @@ export default function (pi: ExtensionAPI) {
 		}));
 	});
 
+	const rememberStreamThinking = (candidate: unknown) => {
+		if (typeof candidate !== "string" || candidate.length === 0) return;
+		// partial/message snapshots are cumulative; keep the most complete copy.
+		if (candidate.length >= streamThinking.length) streamThinking = candidate;
+	};
+
+	pi.on("message_update", (event) => {
+		const assistantEvent = (event as any).assistantMessageEvent;
+		if (!assistantEvent || typeof assistantEvent !== "object") return;
+		const eventType = assistantEvent.type;
+		if (eventType !== "thinking_start" && eventType !== "thinking_delta" && eventType !== "thinking_end") return;
+
+		if (streamThinkingStep !== currentStep) {
+			streamThinkingStep = currentStep;
+			streamThinking = "";
+			streamThinkingRedacted = false;
+			streamThinkingDeltaCount = 0;
+		}
+
+		if (eventType === "thinking_delta") {
+			if (typeof assistantEvent.delta === "string" && assistantEvent.delta.length > 0) {
+				streamThinking += assistantEvent.delta;
+				streamThinkingDeltaCount += 1;
+			}
+		} else if (eventType === "thinking_end") {
+			rememberStreamThinking(assistantEvent.content);
+		}
+
+		// event.message / event.partial are cumulative snapshots. They cover providers that
+		// put thinking text on the partial block without a separate delta payload.
+		for (const candidate of [(event as any).message, assistantEvent.partial]) {
+			const parts = extractParts(candidate);
+			rememberStreamThinking(parts.thinking);
+			if (parts.thinkingRedacted) streamThinkingRedacted = true;
+		}
+	});
+
 	pi.on("message_end", (event) => {
 		const message = event.message as any;
 		// 只关心 assistant 消息（user/toolResult 不是一个推理 step）
 		if (message?.role !== "assistant") return;
 
 		const parts = extractParts(message);
+		const hasStreamThinking = streamThinkingStep === currentStep && streamThinking.length > 0;
+		if (!parts.thinking && hasStreamThinking) {
+			parts.thinking = streamThinking;
+		}
+		if (streamThinkingStep === currentStep && streamThinkingRedacted && !parts.thinking) {
+			parts.thinkingRedacted = true;
+		}
+		const thinkingSource = parts.thinking
+			? (hasStreamThinking && parts.thinking === streamThinking ? "stream" : "message")
+			: undefined;
+		const thinkingDeltaCount = streamThinkingStep === currentStep && streamThinkingDeltaCount > 0
+			? streamThinkingDeltaCount
+			: undefined;
 		const now = Date.now();
 
 		// 关联接下来的 tool_call → 当前 step
@@ -602,6 +685,8 @@ export default function (pi: ExtensionAPI) {
 			durationMs: now - stepStartTime,
 			thinking: parts.thinking || undefined,
 			thinkingRedacted: parts.thinkingRedacted || undefined,
+			thinkingSource,
+			thinkingDeltaCount,
 			text: parts.text || undefined,
 			toolCalls: parts.toolCalls.length
 				? parts.toolCalls.map((tc) => ({ name: tc.name, args: tc.args }))
@@ -615,6 +700,8 @@ export default function (pi: ExtensionAPI) {
 			durationMs: now - stepStartTime,
 			thinking: parts.thinking || undefined,
 			thinkingRedacted: parts.thinkingRedacted || undefined,
+			thinkingSource,
+			thinkingDeltaCount,
 			text: parts.text || undefined,
 			toolCalls: parts.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, args: tc.args })),
 			toolCallCount: parts.toolCalls.length,
@@ -664,14 +751,16 @@ export default function (pi: ExtensionAPI) {
 		recordFileChange(event.toolName, event.args, event.isError);
 		trackToolUsage(event.toolName, durationMs, event.isError);
 
-		// 提取结果摘要
-		// 提取结果摘要：错误时多保留些信息以便诊断
+		// 提取结果摘要：subagent / 错误情况下保留更多信息以便诊断
 		let resultPreview: string | undefined;
 		let resultFullLength = 0;
 		try {
 			const r = JSON.stringify(event.result);
 			resultFullLength = r?.length ?? 0;
-			const maxLen = event.isError ? 3000 : 500; // 错误保留 3000，成功保留 500
+			// subagent 工具：即使 isError=false，子 agent 也可能失败（pi 不冒泡到 isError），
+			// 而失败信息恰恰在 result.content 里 —— 所以 subagent 的 preview 给大额度
+			const isSubagent = event.toolName === "subagent";
+			const maxLen = isSubagent ? 8000 : (event.isError ? 3000 : 500);
 			resultPreview = r && r.length > maxLen ? r.slice(0, maxLen) + "...[truncated]" : r;
 		} catch {
 			resultPreview = "[non-serializable]";
@@ -709,6 +798,11 @@ export default function (pi: ExtensionAPI) {
 						finalOutput: extractSubagentFinalText(r.messages),
 						// 子 agent 调过的工具（只记名字+是否错误，不包含 args）
 						toolsUsed: extractSubagentTools(r.messages),
+						// 完整 messages（每条 message 单独 summarize+截断），用于在 trace.html 里
+						// 把子 agent 的内部步骤展开成 llm-generation + tool 子节点
+						messages: Array.isArray(r.messages)
+							? r.messages.map(summarizeMessage)
+							: undefined,
 					})),
 				};
 			}

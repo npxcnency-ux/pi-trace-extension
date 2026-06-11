@@ -71,6 +71,7 @@ body {
 .node-row.status-error .node-name { color: var(--err); }
 .node-row.status-aborted .node-name { color: var(--warn); }
 .node-duration { color: var(--muted); font-size: 11px; font-family: ui-monospace, Menlo, monospace; flex-shrink: 0; }
+.node-tokens { color: var(--muted); font-size: 11px; font-family: ui-monospace, Menlo, monospace; flex-shrink: 0; margin-right: 8px; opacity: 0.85; }
 .node-children.hidden { display: none; }
 
 .dag-pane { border-top: 1px solid var(--border); padding: 10px 12px; flex-shrink: 0; background: var(--panel); max-height: 240px; overflow-y: auto; }
