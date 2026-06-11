@@ -1,0 +1,17 @@
+node_modules/
+__pycache__/
+*.pyc
+
+# 千万别 commit 任何 trace 数据
+*.jsonl
+trace.html
+
+# 编辑器
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# 临时 build
+dist/
+build/

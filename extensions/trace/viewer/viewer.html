@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Pi Trace · {session_name}</title>
+<style>{css}</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="topbar-icon">⚡</span>
+  <span class="topbar-title">Trace · pi-agent:</span>
+  <span class="topbar-id" id="copy-id" title="点击复制">{session_name}</span>
+  <div class="topbar-meta">
+    <span><b>{interaction_count}</b> interactions</span>
+    <span><b>{step_count}</b> llm-generations</span>
+    <span><b>{tool_count}</b> tool calls</span>
+    <span><b>{total_cost}</b> 总成本</span>
+    <span><b>{total_dur}</b> 总耗时</span>
+  </div>
+</div>
+<div class="main">
+  <div class="tree-pane">
+    <div class="tree-search"><input type="text" id="tree-search" placeholder="搜索节点 (名称 / 工具 / prompt)" /></div>
+    <div class="tree-toolbar">
+      <button id="expand-all">▼ 展开全部</button>
+      <button id="collapse-all">▶ 折叠全部</button>
+    </div>
+    <div class="tree-list" id="tree-list"></div>
+    <div class="dag-pane">
+      <div class="dag-title">节点统计 (ok / total)</div>
+      <div class="dag-grid" id="dag-grid"></div>
+    </div>
+  </div>
+  <div class="detail-pane" id="detail-pane">
+    <div class="detail-empty">从左侧选择节点查看详情</div>
+  </div>
+</div>
+<script>{js}</script>
+</body>
+</html>

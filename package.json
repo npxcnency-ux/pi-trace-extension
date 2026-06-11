@@ -1,0 +1,45 @@
+{
+  "name": "pi-trace-extension",
+  "version": "0.1.0",
+  "description": "Langfuse-style trace viewer for pi-agent — local-first, zero-setup, single-file HTML",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-agent",
+    "trace",
+    "tracing",
+    "observability",
+    "langfuse",
+    "llm",
+    "agent"
+  ],
+  "license": "MIT",
+  "author": "npxcnency-ux",
+  "homepage": "https://github.com/npxcnency-ux/pi-trace-extension",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/npxcnency-ux/pi-trace-extension.git"
+  },
+  "bugs": {
+    "url": "https://github.com/npxcnency-ux/pi-trace-extension/issues"
+  },
+  "files": [
+    "extensions",
+    "examples",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "image": "https://raw.githubusercontent.com/npxcnency-ux/pi-trace-extension/main/examples/screenshot.png"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
