@@ -381,6 +381,19 @@ function renderDetail(node) {
       }
       section("skills", "Skills Loaded", wrap, node.data.skillsLoaded.length);
     }
+    if (node.data.modelChanges && node.data.modelChanges.length) {
+      const wrap = el("div", "fc-list");
+      node.data.modelChanges.forEach((mc) => {
+        const row = el("div");
+        const tsStr = fmtIso(mc.ts);
+        const txt = mc.previousModel
+          ? `${tsStr}  ${mc.previousModel}  →  ${mc.model}` + (mc.source ? ` (${mc.source})` : "")
+          : `${tsStr}  → ${mc.model}` + (mc.source ? ` (${mc.source})` : "");
+        setText(row, txt);
+        wrap.appendChild(row);
+      });
+      section("models", "Model Changes (session-wide)", wrap, node.data.modelChanges.length);
+    }
     section("metadata", "Metadata", renderJsonRoot({
       interactionId: node.data.interactionId,
       systemPromptLength: node.data.systemPromptLength,

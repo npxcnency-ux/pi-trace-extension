@@ -459,15 +459,14 @@ def build_tree(events):
             prev_model = current_model
             if new_model:
                 current_model = new_model
-                model_changes.append({
+                entry = {
                     "ts": ts, "model": new_model, "previousModel": prev_model,
                     "source": e.get("source"),
-                })
+                }
+                model_changes.append(entry)
                 # 把当前 turn 标记为 "model 切换发生过"——便于 UI 显示
                 if cur_turn_key and cur_turn_key in turns:
-                    turns[cur_turn_key]["data"].setdefault("modelChanges", []).append({
-                        "ts": ts, "model": new_model, "previousModel": prev_model,
-                    })
+                    turns[cur_turn_key]["data"].setdefault("modelChanges", []).append(entry)
         elif t == "session_shutdown":
             sm["end_ts"] = ts
 
@@ -502,6 +501,10 @@ def build_tree(events):
     for inter in interactions:
         for k in ("input","output","cacheRead","cacheWrite","cost"):
             root["data"]["totalUsage"][k] += inter["data"]["totalUsage"].get(k, 0)
+    # 把全局 model_changes 复制到每个 interaction，便于在 interaction 详情里直接看到完整切换历史
+    if model_changes:
+        for inter in interactions:
+            inter["data"]["modelChanges"] = model_changes
     finalize(root)
     return root
 
