@@ -320,6 +320,20 @@ function renderDetail(node) {
   }
 
   if (t === "session") {
+    // model 切换历史
+    if (node.data.modelChanges && node.data.modelChanges.length) {
+      const wrap = el("div", "fc-list");
+      node.data.modelChanges.forEach((mc) => {
+        const row = el("div");
+        const tsStr = fmtIso(mc.ts);
+        const txt = mc.previousModel
+          ? `${tsStr}  ${mc.previousModel}  →  ${mc.model}` + (mc.source ? ` (${mc.source})` : "")
+          : `${tsStr}  → ${mc.model}` + (mc.source ? ` (${mc.source})` : "");
+        setText(row, txt);
+        wrap.appendChild(row);
+      });
+      section("models", "Model Changes", wrap, node.data.modelChanges.length);
+    }
     section("metadata", "Metadata", renderJsonRoot({
       sessionId: node.data.sessionId, cwd: node.data.cwd, model: node.data.model,
       duration: fmtMs(node.duration_ms),
@@ -375,6 +389,19 @@ function renderDetail(node) {
       totalUsage: node.data.totalUsage,
     }));
   } else if (t === "turn") {
+    if (node.data.modelChanges && node.data.modelChanges.length) {
+      const wrap = el("div", "fc-list");
+      node.data.modelChanges.forEach((mc) => {
+        const row = el("div");
+        const tsStr = fmtIso(mc.ts);
+        const txt = mc.previousModel
+          ? `${tsStr}  ${mc.previousModel}  →  ${mc.model}`
+          : `${tsStr}  → ${mc.model}`;
+        setText(row, txt);
+        wrap.appendChild(row);
+      });
+      section("models", "Model Changes (this turn)", wrap, node.data.modelChanges.length);
+    }
     section("metadata", "Metadata", renderJsonRoot({
       turnIndex: node.data.turnIndex,
       epoch: node.data.epoch,

@@ -429,7 +429,8 @@ export default function (pi: ExtensionAPI) {
 		return rest;
 	};
 
-	pi.on("model_change", (event) => {
+	// pi 的扩展事件名是 "model_select"（不是 "model_change"——后者是 session.jsonl 里的持久化类型）
+	pi.on("model_select", (event) => {
 		writeEvent(baseEvent({ type: "model_change", ...spreadEvent(event) }));
 	});
 

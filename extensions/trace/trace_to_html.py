@@ -190,6 +190,8 @@ def build_tree(events):
     cur_turn_key = None
     cur_turn_seq = 0  # 当前 interaction 内 turn 序号
     epoch = 0  # 每遇到 session_start 自增。同一 jsonl 可能记录多次 pi 进程生命周期。
+    current_model = None  # 当前选中的模型（model_change 事件维护）
+    model_changes = []  # 全局 model_change 历史，每条 {ts, model, previousModel, source}
     sm = {"sessionId": None, "cwd": None, "model": None, "start_ts": None, "end_ts": None}
 
     def ensure_turn(ts, ti):
@@ -295,7 +297,8 @@ def build_tree(events):
                     "llm_start": None, "llm_end": None, "llm_status": None,
                     "thinking": None, "thinkingRedacted": None,
                     "text": None, "toolCalls": [], "usage": None,
-                    "stopReason": None, "errorMessage": None, "diagnostics": None, "model": None,
+                    "stopReason": None, "errorMessage": None, "diagnostics": None,
+                    "model": current_model,  # 当前 model_change 已设的模型
                     "input": None,
                 },
                 "children": [],
@@ -450,6 +453,21 @@ def build_tree(events):
                 if e.get("finalText"): inter["data"]["finalText"] = e["finalText"]
                 if e.get("model"): inter["data"]["model"] = e["model"]
                 inter["end"] = max(inter["end"], ts)
+        elif t == "model_change":
+            # 维护当前模型，把每个 step 都标记上"当时用的模型"
+            new_model = (e.get("model") or {}).get("id") or e.get("modelId") or e.get("id")
+            prev_model = current_model
+            if new_model:
+                current_model = new_model
+                model_changes.append({
+                    "ts": ts, "model": new_model, "previousModel": prev_model,
+                    "source": e.get("source"),
+                })
+                # 把当前 turn 标记为 "model 切换发生过"——便于 UI 显示
+                if cur_turn_key and cur_turn_key in turns:
+                    turns[cur_turn_key]["data"].setdefault("modelChanges", []).append({
+                        "ts": ts, "model": new_model, "previousModel": prev_model,
+                    })
         elif t == "session_shutdown":
             sm["end_ts"] = ts
 
@@ -476,6 +494,7 @@ def build_tree(events):
             "sessionId": sm.get("sessionId"), "cwd": sm.get("cwd"),
             "model": sm.get("model"),
             "interactionCount": len(interactions),
+            "modelChanges": model_changes,  # 全局 model 切换历史
             "totalUsage": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":0},
         },
         "children": interactions,
