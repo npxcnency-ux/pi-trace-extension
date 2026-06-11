@@ -392,7 +392,7 @@ function renderDetail(node) {
         setText(row, txt);
         wrap.appendChild(row);
       });
-      section("models", "Model Changes (session-wide)", wrap, node.data.modelChanges.length);
+      section("models", "Model Changes", wrap, node.data.modelChanges.length);
     }
     section("metadata", "Metadata", renderJsonRoot({
       interactionId: node.data.interactionId,

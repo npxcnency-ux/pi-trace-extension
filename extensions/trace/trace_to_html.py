@@ -501,10 +501,26 @@ def build_tree(events):
     for inter in interactions:
         for k in ("input","output","cacheRead","cacheWrite","cost"):
             root["data"]["totalUsage"][k] += inter["data"]["totalUsage"].get(k, 0)
-    # 把全局 model_changes 复制到每个 interaction，便于在 interaction 详情里直接看到完整切换历史
-    if model_changes:
-        for inter in interactions:
-            inter["data"]["modelChanges"] = model_changes
+    # 把 model_changes 归属到对应 interaction：
+    # - 落在 [start, end) 内 → 归属该 interaction
+    # - 落在两个 interaction 之间的"间隙"（用户切了模型还没发消息）→ 归属下一个 interaction
+    # - 第一个 interaction 之前的切换 → 归属第一个 interaction
+    if model_changes and interactions:
+        sorted_inters = sorted(interactions, key=lambda i: i.get("start") or 0)
+        for mc in model_changes:
+            ts = mc.get("ts")
+            if not ts: continue
+            target = None
+            for inter in sorted_inters:
+                i_start = inter.get("start") or 0
+                i_end = inter.get("end") or i_start
+                if i_start <= ts < i_end:
+                    target = inter; break
+                if ts < i_start:
+                    target = inter; break  # 落在间隙或第一个之前 → 下一个
+            if target is None:
+                target = sorted_inters[-1]  # 落在最后一个之后 → 最后一个
+            target["data"].setdefault("modelChanges", []).append(mc)
     finalize(root)
     return root
 
