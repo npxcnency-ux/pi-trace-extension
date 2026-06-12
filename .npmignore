@@ -1,0 +1,12 @@
+# 别把本地 Python 字节码塞进发布包
+__pycache__/
+*.pyc
+*.pyo
+
+# 别把 trace 数据 / 编辑器垃圾发出去
+*.jsonl
+trace.html
+.DS_Store
+
+# 仓库工程文件，最终用户不需要
+.gitignore
