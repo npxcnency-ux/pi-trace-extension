@@ -32,6 +32,24 @@ const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PYTHON_SCRIPT = path.join(EXTENSION_DIR, "trace_to_html.py");
 const PYTHON_BIN = process.env.PI_TRACE_PYTHON || "python3";
 
+// 读文件的第一行而不读整个文件（child events.jsonl 可能很大；只看 session_start.ts）
+function readFirstLine(file: string, maxBytes = 8192): string {
+	let fd: number | null = null;
+	try {
+		fd = fs.openSync(file, "r");
+		const buf = Buffer.alloc(maxBytes);
+		const n = fs.readSync(fd, buf, 0, maxBytes, 0);
+		if (n <= 0) return "";
+		const slice = buf.slice(0, n).toString("utf-8");
+		const nl = slice.indexOf("\n");
+		return nl >= 0 ? slice.slice(0, nl) : slice;
+	} catch {
+		return "";
+	} finally {
+		if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+	}
+}
+
 interface TraceEvent {
 	ts: number;
 	sessionId: string;
@@ -246,6 +264,16 @@ export default function (pi: ExtensionAPI) {
 		if (m.tool_calls) out.tool_calls = m.tool_calls;
 		if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
 		if (m.name) out.name = m.name;
+		// assistant message 字段
+		if (m.model) out.model = m.model;
+		if (m.stopReason) out.stopReason = m.stopReason;
+		if (m.errorMessage) out.errorMessage = m.errorMessage;
+		// toolResult 顶层字段
+		if (m.role === "toolResult") {
+			if (m.toolCallId) out.toolCallId = m.toolCallId;
+			if (m.toolName) out.toolName = m.toolName;
+			if (typeof m.isError === "boolean") out.isError = m.isError;
+		}
 		// 透传 timestamp（pi 在 message 上记录了，给 trace 重建子 agent 时间轴用）
 		if (m.timestamp) out.timestamp = m.timestamp;
 		// 单条 message 的 usage（如果有），按 step 拆 token 用
@@ -338,31 +366,48 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (event, ctx) => {
 		const ev = event as any;
-		// 检测是否为 subagent 进程：subagent 没有真正的 session.jsonl 文件
-		// 父 trace 已经在 subagent 工具调用里完整嵌套了子任务的输入/输出/工具列表，
-		// 这边再独立写一份 trace 会污染 ~/.pi/agent/traces/ 目录且数据冗余。
+		// 检测是否为 subagent 进程：subagent 的 sessionFile == null（因为 --no-session）
 		const sessionFile = ctx.sessionManager?.getSessionFile?.();
-		if (!sessionFile) {
-			// 静默跳过，不打日志（subagent 一启动就会发出，避免刷屏）
-			return;
+		const isSubagent = !sessionFile;
+
+		if (isSubagent) {
+			// 子 agent 进程：写到父 session 的 subagents/ 子目录，而不是顶层 traces/
+			// 父目录通过环境变量 PI_TRACE_PARENT_DIR 传入（父进程的 session_start 里设置）
+			const parentDir = process.env.PI_TRACE_PARENT_DIR;
+			if (!parentDir) {
+				// 没有父目录信息（老版本父进程 / 手动跑），静默跳过
+				return;
+			}
+			const childId = ev.sessionId || `sub-${Date.now()}`;
+			sessionId = childId;
+			sessionDir = path.join(parentDir, "subagents", childId);
+			fs.mkdirSync(sessionDir, { recursive: true });
+			traceFile = path.join(sessionDir, "events.jsonl");
+			writeStream = fs.createWriteStream(traceFile, { flags: "a" });
+			// 子 agent 自己也可能再 spawn 子 agent —— 把环境变量更新到自己的目录，
+			// 否则孙子 agent 会读到祖父的 parentDir，写到顶层 subagents/ 同级而非嵌套
+			process.env.PI_TRACE_PARENT_DIR = sessionDir;
+		} else {
+			// 主 agent 进程：正常写到顶层 traces/<sessionId>/
+			const derivedId = path.basename(sessionFile, ".jsonl");
+			sessionId = derivedId || ev.sessionId || `${Date.now()}`;
+			sessionDir = path.join(TRACE_DIR, sessionId);
+			fs.mkdirSync(sessionDir, { recursive: true });
+			traceFile = path.join(sessionDir, "events.jsonl");
+			writeStream = fs.createWriteStream(traceFile, { flags: "a" });
+			// 通过环境变量让子进程知道父 session 目录
+			// （spawn subagent 时会 inherit env，子 agent trace 扩展读此变量写子目录）
+			process.env.PI_TRACE_PARENT_DIR = sessionDir;
 		}
-
-		// 使用 pi 官方的 session ID（跟 session jsonl 文件名一致）
-		// sessionFile 路径里有完整文件名（带时间戳前缀），这样在文件系统里能按时间排序
-		const derivedId = path.basename(sessionFile, ".jsonl");
-		sessionId = derivedId || ev.sessionId || `${Date.now()}`;
-
-		sessionDir = path.join(TRACE_DIR, sessionId);
-		fs.mkdirSync(sessionDir, { recursive: true });
-		traceFile = path.join(sessionDir, "events.jsonl");
-		writeStream = fs.createWriteStream(traceFile, { flags: "a" });
 
 		writeEvent(baseEvent({
 			type: "session_start",
 			cwd: ctx.cwd,
 			reason: ev.reason,
-			sessionFile,
+			sessionFile: sessionFile ?? null,
 			model: ev.model,
+			isSubagent: isSubagent || undefined,
+			parentDir: isSubagent ? process.env.PI_TRACE_PARENT_DIR : undefined,
 		}));
 	});
 
@@ -772,6 +817,46 @@ export default function (pi: ExtensionAPI) {
 		if (event.toolName === "subagent" && event.result && typeof event.result === "object") {
 			const details = (event.result as any).details;
 			if (details) {
+				// 扫描 subagents/ 子目录，找出在本次 tool_start ~ tool_end 时间窗内启动的子 trace
+				// 注意：toolStartTimes.delete 已在上面执行，这里复用本地 start 变量（line 769）
+				const toolStartTs = start ?? now;
+				const subagentDir = sessionDir ? path.join(sessionDir, "subagents") : null;
+				const childTraces: { id: string; dir: string; startTs: number }[] = [];
+				if (subagentDir && fs.existsSync(subagentDir)) {
+					for (const childId of fs.readdirSync(subagentDir)) {
+						const childEventsFile = path.join(subagentDir, childId, "events.jsonl");
+						if (!fs.existsSync(childEventsFile)) continue;
+						const firstLine = readFirstLine(childEventsFile);
+						if (!firstLine) continue;
+						try {
+							const firstEvent = JSON.parse(firstLine);
+							const childTs = firstEvent?.ts ?? 0;
+							if (childTs >= toolStartTs && childTs <= now) {
+								childTraces.push({ id: childId, dir: path.join(subagentDir, childId), startTs: childTs });
+							}
+						} catch { /* ignore parse errors */ }
+					}
+					childTraces.sort((a, b) => a.startTs - b.startTs);
+				}
+
+				// 子 trace 按 ID 匹配（如果 result 里有 sessionId/childSessionId），否则按
+				// 启动时间序号兜底（parallel 模式下序号匹配不可靠，但比没有强）
+				const usedChildIds = new Set<string>();
+				const matchChildTraceId = (r: any): string | undefined => {
+					const explicitId = r?.sessionId ?? r?.childSessionId ?? r?.session_id;
+					if (typeof explicitId === "string" && explicitId) {
+						const hit = childTraces.find(c => c.id === explicitId);
+						if (hit) { usedChildIds.add(hit.id); return hit.id; }
+						// 显式 ID 提供但未匹配 —— 不要跌入 FIFO 兜底，否则会偷下一个本不属于自己的子 trace
+						return undefined;
+					}
+					// 兜底：按启动时间序号取下一个未被占用的（parallel 模式下顺序不可靠，仅当无显式 ID 时启用）
+					for (const c of childTraces) {
+						if (!usedChildIds.has(c.id)) { usedChildIds.add(c.id); return c.id; }
+					}
+					return undefined;
+				};
+
 				subagentInfo = {
 					mode: details.mode,                  // single / parallel / chain
 					agentScope: details.agentScope,
@@ -784,6 +869,8 @@ export default function (pi: ExtensionAPI) {
 						errorMessage: r.errorMessage,
 						model: r.model,
 						step: r.step,
+						// 优先按 result 携带的 sessionId 匹配，否则按时间序号
+						childTraceId: matchChildTraceId(r),
 						usage: r.usage
 							? {
 									input: r.usage.input ?? 0,

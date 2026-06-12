@@ -26,7 +26,7 @@ Everything stays on your machine.
 | Per-message metadata | Per-step latency, tokens, cost, stop reason, full LLM payload |
 | Tool calls inline as messages | Tools as siblings of `llm-generation` inside a `turn` (Langfuse-style) |
 | No status semantics | `aborted` / `error` / `ok` distinguished and color-coded |
-| Sub-agent runs collapsed into a tool result | Sub-agent fully expanded as a nested branch with its own tools and final output |
+| Sub-agent runs collapsed into a tool result | Sub-agent gets its own nested trace (turns / steps / tools) plus a click-through link from the parent |
 
 > 中文文档见 [README.zh.md](./README.zh.md)
 
@@ -69,6 +69,7 @@ Output:
 | --- | --- |
 | `~/.pi/agent/traces/<session-id>/trace.html` | Single-file viewer, opens in default browser |
 | `~/.pi/agent/traces/<session-id>/events.jsonl` | Machine-readable event stream (append-only) |
+| `~/.pi/agent/traces/<session-id>/subagents/<child-id>/` | Nested directory per sub-agent — same `events.jsonl` + `trace.html` layout, linked from the parent's sub-agent node |
 
 `trace.html` is also auto-generated on `session_shutdown` (without opening the browser), so closing pi normally always leaves a viewable report.
 
@@ -100,7 +101,9 @@ extensions/trace/index.ts
   │  spawn python3 extensions/trace/trace_to_html.py
   │    reads events.jsonl
   │    rebuilds the tree:
-  │      session → interaction → turn → llm-generation + tool → sub-agent
+  │      session → interaction → turn → llm-generation + tool
+  │      sub-agent results carry a child-trace link;
+  │      a sub-agent's own events.jsonl is rendered into its own trace.html
   │    bundles viewer/assets.json (css + js + html) into one file
   └─ writes trace.html  → opens in browser
 ```
@@ -123,7 +126,8 @@ A three-pane Langfuse-style viewer. **Single HTML file, no CDN, no fonts loaded 
 Specific affordances:
 
 - **`aborted` vs `error` vs `ok`** — distinguishes user-cancelled (`⏹` yellow) from real errors (`❌` red). 429 retries that eventually succeed are correctly classified as `ok`.
-- **Sub-agent fully expanded** — when an agent spawns a sub-agent (single / parallel / chain), the sub-agent's tools and final output are nested directly under the tool node.
+- **Sub-agent has its own trace** — when an agent spawns a sub-agent (single / parallel / chain), the child writes its own `events.jsonl` under `subagents/<child-id>/` and gets its own rendered `trace.html`. The parent's sub-agent-result node shows the child's turns / steps / tools inline (rebuilt from messages) and offers an "Open child trace" button to jump into the child's full report. Parallel sub-agents are matched to their on-disk traces by sessionId where available.
+- **Auto-retry detection** — when a turn re-enters with the same `turnIndex` (e.g. framework retried after a 429), the second occurrence is labeled `turn N (retry #1)` instead of collapsing the two into one node.
 - **Full LLM input payload** — `model`, every `messages[]` entry (including `reasoning_content`, `tool_calls`, `tool_result`), the registered `tools[]` schema, and request-level params (max_tokens, temperature, etc.). Long strings are truncated to 8 KB; the truncated length is shown.
 - **Cross-process resilience** — if you reload pi or fork a session, repeated `stepIndex` / `turnIndex` values are correctly disambiguated via an internal `epoch` counter.
 

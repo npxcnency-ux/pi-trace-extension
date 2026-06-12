@@ -456,7 +456,10 @@ function renderDetail(node) {
     }
     section("metadata", "Metadata", renderJsonRoot({
       stepIndex: d.stepIndex, turnIndex: d.turnIndex,
-      stopReason: d.stopReason, llm_status: d.llm_status, usage: d.usage,
+      stopReason: d.stopReason,
+      // llm_status: 主 agent 是 HTTP 状态码；subagent-derived step 从子 trace 取（有则显示）
+      llm_status: d.llm_status,
+      usage: d.usage,
       thinkingSource: d.thinkingSource,
       thinkingDeltaCount: d.thinkingDeltaCount,
       thinkingRedacted: d.thinkingRedacted,
@@ -515,9 +518,31 @@ function renderDetail(node) {
       });
       section("tools", "Tools Used", wrap, d.toolsUsed.length);
     }
+    // Child trace 链接：包到 section 里，避免破坏 .section:first-child 等 CSS 假设
+    if (d.childTraceId) {
+      const wrap = el("div");
+      const btn = el("a", "tag tag-purple");
+      btn.style.cursor = "pointer";
+      btn.style.display = "inline-block";
+      btn.style.textDecoration = "none";
+      setText(btn, "↗ Open child trace");
+      btn.addEventListener("click", () => {
+        // 用 new URL 解析当前页 + 相对路径，避免手写 regex 漏掉 ?query/#fragment
+        // childTraceId 可能含特殊字符（例如 sessionId 里的冒号），encodeURIComponent 防御
+        try {
+          const childUrl = new URL("subagents/" + encodeURIComponent(d.childTraceId) + "/trace.html", window.location.href);
+          window.open(childUrl.href, "_blank");
+        } catch {
+          /* ignore */
+        }
+      });
+      wrap.appendChild(btn);
+      section("childTrace", "Child Trace", wrap);
+    }
     section("metadata", "Metadata", renderJsonRoot({
       agent: d.agent, agentSource: d.agentSource, model: d.model,
       exitCode: d.exitCode, stopReason: d.stopReason, step: d.step, usage: d.usage,
+      childTraceId: d.childTraceId,
     }));
   }
 

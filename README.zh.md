@@ -26,7 +26,7 @@
 | 每条消息的元信息 | 每个 step 的耗时、token、成本、stop reason、完整 LLM payload |
 | 工具调用作为 inline 消息 | 工具作为 `llm-generation` 的兄弟节点挂在 `turn` 下（Langfuse 风格） |
 | 无状态语义 | `aborted` / `error` / `ok` 三态区分并配色 |
-| 子 agent 折叠成一个工具结果 | 子 agent 完整展开成嵌套分支，包含自己的工具和最终输出 |
+| 子 agent 折叠成一个工具结果 | 子 agent 有自己的嵌套 trace（turn / step / tool），父 trace 一键跳转 |
 
 > English docs: [README.md](./README.md)
 
@@ -69,6 +69,7 @@ pi -e npm:pi-trace-extension
 | --- | --- |
 | `~/.pi/agent/traces/<session-id>/trace.html` | 单文件查看器，浏览器自动打开 |
 | `~/.pi/agent/traces/<session-id>/events.jsonl` | 机器可读的事件流（追加写入） |
+| `~/.pi/agent/traces/<session-id>/subagents/<child-id>/` | 子 agent 独立目录，结构同上，父 trace 节点上有跳转按钮 |
 
 `session_shutdown` 时也会自动跑一次（不开浏览器），所以正常退出 pi 后随时可以回看。
 
@@ -100,7 +101,9 @@ extensions/trace/index.ts
   │  spawn python3 extensions/trace/trace_to_html.py
   │    读 events.jsonl
   │    重建树：
-  │      session → interaction → turn → llm-generation + tool → 子 agent
+  │      session → interaction → turn → llm-generation + tool
+  │      子 agent 的 result 节点带跳转链接；
+  │      子 agent 自己的 events.jsonl 也独立渲染出一份 trace.html
   │    把 viewer/assets.json（css + js + html）注入到一个文件
   └─ 写出 trace.html → 浏览器打开
 ```
@@ -123,7 +126,8 @@ extensions/trace/index.ts
 具体能力：
 
 - **`aborted` / `error` / `ok` 三态** — 用户取消（`⏹` 黄）vs 真错误（`❌` 红）vs 正常。pi 撞 429 自动 retry 后最终成功的，整体仍计为 `ok`，不会被中间失败误判。
-- **子 agent 完整展开** — 派生子 agent（single / parallel / chain）时，子 agent 的工具调用和最终输出会作为节点直接挂在工具节点下。
+- **子 agent 有独立 trace** — 派生子 agent（single / parallel / chain）时，子进程把自己的 `events.jsonl` 写到 `subagents/<child-id>/`，并独立生成一份 `trace.html`。父 trace 的子 agent 节点会内联展示子 agent 的 turn / step / tool（从 messages 重建），并提供「Open child trace」跳转按钮。parallel 模式下尽量按 sessionId 匹配父子关系。
+- **Retry 检测** — 同一个 `turnIndex` 在一个 interaction 内出现第二次（比如 429 后框架重试），节点名会标记成 `turn N (retry #1)`，不会被折叠成同一个 turn。
 - **完整 LLM input payload** — `model`、所有 `messages[]` 条目（含 `reasoning_content`、`tool_calls`、`tool_result`）、注册过的 `tools[]` schema、请求级参数（max_tokens、temperature 等）。超长字符串截断到 8 KB，截断长度会显示出来。
 - **跨进程容错** — 重启 pi 或 fork session 时，重复的 `stepIndex` / `turnIndex` 通过内部 `epoch` 计数器正确区分，不会渲染出"两个 turn 0"。
 

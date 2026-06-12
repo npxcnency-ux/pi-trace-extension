@@ -34,8 +34,92 @@ def fmt_money(x):
     return f"${x:.3f}"
 
 
-def _build_subagent_subtree(messages, parent_id):
-    """Rebuild subagent messages into llm-generation/tool child nodes."""
+def _find_child_traces_for_tool(session_dir, tool_start_ts, tool_end_ts):
+    """在 subagents/ 目录里按时间窗口找属于这次 subagent 工具调用的子 trace。
+
+    子 trace session_start.ts 落在 [tool_start_ts, tool_end_ts] 内即匹配。
+    返回按 session_start.ts 排序的目录路径列表。
+    渲染时调用（子进程已结束，文件写完），比采集时可靠。
+    """
+    if not session_dir:
+        return []
+    subagents_dir = Path(session_dir) / "subagents"
+    if not subagents_dir.is_dir():
+        return []
+    matches = []
+    for child_dir in subagents_dir.iterdir():
+        child_f = child_dir / "events.jsonl"
+        if not child_f.exists():
+            continue
+        try:
+            with open(child_f, encoding="utf-8") as fh:
+                first_line = fh.readline().strip()
+            if not first_line:
+                continue
+            first_ev = json.loads(first_line)
+        except Exception:
+            continue
+        child_ts = first_ev.get("ts") or 0
+        if tool_start_ts <= child_ts <= tool_end_ts:
+            matches.append((child_ts, str(child_dir)))
+    matches.sort(key=lambda x: x[0])
+    return [m[1] for m in matches]
+
+
+def _load_child_trace_steps(child_trace_dir):
+    """子 trace events.jsonl → 按出现顺序的 step 信息列表。
+
+    每条 step 对应子 agent 内一次 LLM 调用，包含：
+    turnIndex / stopReason / llm_status / llm_start / llm_end
+    按 step_start 出现的时间顺序排列，与 messages 里 assistant message 的顺序一致。
+    """
+    f = Path(child_trace_dir) / "events.jsonl"
+    if not f.exists():
+        return []
+    steps_by_si = {}   # stepIndex → partial info
+    step_order = []    # step_start 出现的 stepIndex 序列（currentStep 单调递增，无重复）
+    with open(f, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                # 单行损坏（例如 crash 时的半截最后行）不应丢失整文件已解析的步骤
+                continue
+            t = e.get("type")
+            si = e.get("stepIndex")
+            if si is None:
+                continue
+            if t == "step_start":
+                steps_by_si.setdefault(si, {})
+                step_order.append(si)
+            elif t == "llm_request":
+                steps_by_si.setdefault(si, {})["llm_start"] = e.get("ts")
+                # 完整发给 LLM 的 payload（model + messages + tools），用于 Input 视图
+                if e.get("input") is not None:
+                    steps_by_si[si]["input"] = e.get("input")
+            elif t == "llm_response":
+                steps_by_si.setdefault(si, {})["llm_end"] = e.get("ts")
+                steps_by_si[si]["llm_status"] = e.get("status")
+            elif t == "step_end":
+                steps_by_si.setdefault(si, {}).update({
+                    "turnIndex": e.get("turnIndex"),
+                    "stopReason": e.get("stopReason"),
+                    "errorMessage": e.get("errorMessage"),
+                    "model": e.get("model"),
+                })
+    return [steps_by_si[si] for si in step_order if si in steps_by_si]
+
+
+def _build_subagent_subtree(messages, parent_id, child_steps=None):
+    """Rebuild subagent messages into llm-generation/tool child nodes.
+
+    child_steps: list of per-step info from the child trace (optional).
+    When provided, fields like turnIndex / stopReason / llm_status are filled
+    from the actual child trace rather than left null.
+    """
     if not isinstance(messages, list) or not messages:
         return []
 
@@ -81,17 +165,41 @@ def _build_subagent_subtree(messages, parent_id):
         ts = m.get("timestamp")
         usage = m.get("usage") or {}
         thinking = "\n".join(t for t in thinking_parts if t) or None
+
+        # 从子 trace 补全 step 信息（按出现序号一一对应）
+        cs = child_steps[step_seq - 1] if child_steps and step_seq - 1 < len(child_steps) else {}
+
+        # llm_start / llm_end 来自子 trace；fallback 到 message.timestamp
+        llm_start = cs.get("llm_start") or ts
+        llm_end = cs.get("llm_end") or ts
+
+        # status: 优先看子 trace（cs），其次看 message 自身字段，避免子 trace 缺失时
+        # detail 区显示了 errorMessage / stopReason 但树节点仍显示绿色的不一致
+        eff_stop = cs.get("stopReason") or m.get("stopReason")
+        eff_err = cs.get("errorMessage") or m.get("errorMessage")
+        if eff_stop == "aborted":
+            step_status = "aborted"
+        elif eff_stop == "error" or eff_err:
+            step_status = "error"
+        else:
+            step_status = "ok"
+
         step_node = {
             "id": f"{parent_id}-llm-{step_seq}",
             "parent_id": parent_id,
             "type": "step",
             "name": "llm-generation",
             "icon": "🧠",
-            "start": ts,
-            "end": ts,
-            "status": "ok",
+            "start": llm_start,
+            "end": llm_end,
+            "status": step_status,
             "data": {
                 "stepIndex": step_seq,
+                # turnIndex 只能从子 trace 的 step_end 里取
+                "turnIndex": cs.get("turnIndex"),
+                "llm_start": llm_start,
+                "llm_end": llm_end,
+                "llm_status": cs.get("llm_status"),
                 "thinking": thinking,
                 "thinkingRedacted": thinking_redacted or None,
                 "thinkingSource": thinking_source,
@@ -101,10 +209,12 @@ def _build_subagent_subtree(messages, parent_id):
                     for tc in tool_calls
                 ],
                 "usage": usage if usage else None,
-                "stopReason": None,
-                "errorMessage": None,
-                "model": None,
-                "input": None,
+                # stopReason / model / errorMessage：优先从子 trace，fallback 到 message
+                "stopReason": eff_stop,
+                "errorMessage": eff_err,
+                "model": cs.get("model") or m.get("model"),
+                # 子 trace 的 llm_request.input（完整 LLM payload）；老格式无子 trace 时为 None
+                "input": cs.get("input"),
                 "_subagentDerived": True,
             },
             "children": [],
@@ -144,15 +254,69 @@ def _build_subagent_subtree(messages, parent_id):
                     "args": tc.get("input"),
                     "resultPreview": result_text or None,
                     "resultTotalLength": len(result_text) if result_text else None,
-                    "isError": None,
+                    # tr_msg.isError 现在由 summarizeMessage 透传（之前一直是 None）
+                    "isError": tr_msg.get("isError") if tr_msg else None,
                     "stepIndex": step_seq,
                     "subagent": None,
                     "_subagentDerived": True,
                 },
                 "children": [],
             }
+            # 根据 isError 更新 status
+            if tool_node["data"]["isError"]:
+                tool_node["status"] = "error"
             out.append(tool_node)
-    return out
+
+    # 后处理：按 step.data.turnIndex 把扁平 step+tool 列表聚成 turn 子节点
+    # （子 agent 没有独立的 turn_start 事件，turnIndex 只挂在 step 上）
+    # tool 节点跟随最近一个有 turnIndex 的 step；turnIndex 全缺失时退回扁平结构
+    has_any_turn = any(n.get("type") == "step" and n["data"].get("turnIndex") is not None for n in out)
+    if not has_any_turn:
+        return out
+
+    turns_by_ti = {}      # turnIndex → turn node
+    turn_order = []       # 出现顺序
+    cur_ti = None         # tool 节点跟随的 turnIndex
+
+    def _get_or_make_turn(key, name, ti_val):
+        if key not in turns_by_ti:
+            turns_by_ti[key] = {
+                "id": f"{parent_id}-turn-{key}",
+                "parent_id": parent_id,
+                "type": "turn", "name": name, "icon": "↔",
+                "start": None, "end": None, "status": "ok",
+                "data": {"turnIndex": ti_val, "_subagentDerived": True},
+                "children": [],
+            }
+            turn_order.append(key)
+        return turns_by_ti[key]
+
+    def _extend(tn, n):
+        n["parent_id"] = tn["id"]
+        tn["children"].append(n)
+        ns, ne = n.get("start"), n.get("end")
+        if ns is not None and (tn["start"] is None or ns < tn["start"]):
+            tn["start"] = ns
+        if ne is not None and (tn["end"] is None or ne > tn["end"]):
+            tn["end"] = ne
+        if n.get("status") == "error":
+            tn["status"] = "error"
+        elif n.get("status") == "aborted" and tn["status"] != "error":
+            tn["status"] = "aborted"
+
+    for n in out:
+        if n.get("type") == "step":
+            ti = n["data"].get("turnIndex")
+            if ti is not None:
+                cur_ti = ti
+        ti = cur_ti
+        if ti is None:
+            tn = _get_or_make_turn("flat", "turn ?", None)
+        else:
+            tn = _get_or_make_turn(ti, f"turn {ti}", ti)
+        _extend(tn, n)
+
+    return [turns_by_ti[k] for k in turn_order]
 
 
 def _extract_subagent_failures(result_preview):
@@ -179,7 +343,7 @@ def _extract_subagent_failures(result_preview):
         out[f"_idx_{idx}"] = msg
     return out
 
-def build_tree(events):
+def build_tree(events, session_dir=None):
     interactions = []
     turns = {}     # 复合 key: (epoch, iid, turn_seq) -> turn node。turn_seq 是该 interaction 内 turn 的出现序号
     steps = {}     # 复合 key: (epoch, iid, stepIndex) -> step node
@@ -191,6 +355,8 @@ def build_tree(events):
     cur_turn_seq = 0  # 当前 interaction 内 turn 序号
     epoch = 0  # 每遇到 session_start 自增。同一 jsonl 可能记录多次 pi 进程生命周期。
     current_model = None  # 当前选中的模型（model_change 事件维护）
+    # session_dir 用于定位子 trace 目录（subagents/<childTraceId>/）
+    sessionDir = session_dir  # noqa: N806 —— 与 TS 代码变量名对齐方便阅读
     model_changes = []  # 全局 model_change 历史，每条 {ts, model, previousModel, source}
     sm = {"sessionId": None, "cwd": None, "model": None, "start_ts": None, "end_ts": None}
 
@@ -211,11 +377,20 @@ def build_tree(events):
         cur_turn_seq += 1
         seq = cur_turn_seq
         key = (epoch, cur_iid, seq)
+        # 检测 retry：同一 interaction 里相同 turnIndex 出现第二次以上
+        ti_count = sum(1 for k, v in turns.items()
+                       if k[0] == epoch and k[1] == cur_iid
+                       and v["data"].get("turnIndex") == ti)
+        if ti_count > 0 and ti is not None:
+            name = f"turn {ti} (retry #{ti_count})"
+        else:
+            name = f"turn {ti if ti is not None else seq}"
         turns[key] = {
             "id": f"turn-{epoch}-{cur_iid}-{seq}", "parent_id": cur["id"],
-            "type": "turn", "name": f"turn {ti if ti is not None else seq}", "icon": "↔",
+            "type": "turn", "name": name, "icon": "↔",
             "start": ts, "end": None, "status": "ok",
             "data": {"turnIndex": ti, "turnSeq": seq, "epoch": epoch, "interactionId": cur_iid,
+                     "isRetry": ti_count > 0 and ti is not None,
                      "usage": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":0}},
             "children": [],
         }
@@ -381,10 +556,10 @@ def build_tree(events):
                         tn["name"] = f"subagent[{mode}×{len(sub_results)}]"
                     # 子 agent 中只要有一个失败，外层节点也标红
                     any_sub_err = False
-                    for idx, sr in enumerate(sub_results, 1):
+                    for idx, sr in enumerate(sub_results):
                         # 多重判定：exitCode != 0、stopReason 是 error/aborted、原 errorMessage 非空、或 resultPreview 抽出的失败信息
                         agent_name = sr.get("agent") or f"subagent-{idx}"
-                        msg_from_preview = failure_msgs.get(agent_name) or failure_msgs.get(f"_idx_{idx-1}")
+                        msg_from_preview = failure_msgs.get(agent_name) or failure_msgs.get(f"_idx_{idx}")
                         is_err = (
                             (sr.get("exitCode") not in (0, None))
                             or sr.get("stopReason") in ("error", "aborted")
@@ -408,13 +583,36 @@ def build_tree(events):
                                 "finalOutput": sr.get("finalOutput"),
                                 "usage": sr.get("usage"), "toolsUsed": sr.get("toolsUsed"),
                                 "step": sr.get("step"),
+                                "childTraceId": sr.get("childTraceId"),  # 关联子 trace
                             },
                             "children": [],
                         }
                         # 把子 agent 的 messages 重建成 step + tool 子节点
+                        # 优先用 TS 已 sessionId 匹配的 childTraceId 直接定位子 trace 目录，
+                        # 缺失时（老 trace / TS 没拿到 sessionId）退回时间窗扫描兜底
                         sub_messages = sr.get("messages")
                         if sub_messages:
-                            sn["children"] = _build_subagent_subtree(sub_messages, sn["id"])
+                            child_steps = []
+                            child_dir = None
+                            if sessionDir:
+                                explicit_id = sr.get("childTraceId")
+                                if explicit_id:
+                                    cand = Path(sessionDir) / "subagents" / explicit_id
+                                    if cand.is_dir():
+                                        child_dir = str(cand)
+                                if not child_dir:
+                                    # 兜底：按 tool 时间窗 + result 顺序定位（parallel 模式不可靠）
+                                    tool_start_ts = tn["start"] or 0
+                                    tool_end_ts = ts  # 当前 tool_end 时间
+                                    child_dirs = _find_child_traces_for_tool(
+                                        sessionDir, tool_start_ts, tool_end_ts
+                                    )
+                                    child_dir = child_dirs[idx] if idx < len(child_dirs) else None
+                                if child_dir:
+                                    child_steps = _load_child_trace_steps(child_dir)
+                                    # 回填 childTraceId 供 UI 跳转按钮使用（兜底路径才会改写）
+                                    sn["data"]["childTraceId"] = Path(child_dir).name
+                            sn["children"] = _build_subagent_subtree(sub_messages, sn["id"], child_steps)
                         tn["children"].append(sn)
                     # 外层 subagent 节点状态：任一子 agent 失败就染红
                     if any_sub_err:
@@ -607,7 +805,7 @@ def main():
             try: events.append(json.loads(line))
             except: pass
 
-    root = build_tree(events)
+    root = build_tree(events, session_dir=str(session))
     scrub_tree(root)
     dag = collect_dag_stats(root)
 
