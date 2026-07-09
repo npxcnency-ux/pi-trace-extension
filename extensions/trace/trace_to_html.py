@@ -5,8 +5,9 @@
 用法:
     python3 trace_to_html.py            # 最新 session
     python3 trace_to_html.py <session>
+    python3 trace_to_html.py --dashboard  # 生成跨会话 dashboard
 """
-import json, sys, html, re
+import json, sys, html, re, time
 from pathlib import Path
 from collections import defaultdict
 
@@ -780,7 +781,152 @@ def scrub_tree(n):
     for c in n.get("children", []): scrub_tree(c)
 
 
+# ————————————————————— Dashboard —————————————————————
+
+def extract_summary(session_dir: Path):
+    """线性扫一遍 events.jsonl，提取 dashboard 需要的最小字段。不 build tree。"""
+    ev_file = session_dir / "events.jsonl"
+    if not ev_file.exists():
+        return None
+    started_at = None
+    ended_at = None
+    cwd = None
+    first_prompt = None
+    interactions = turns = tools = 0
+    errors = aborted = 0
+    total_input = total_output = total_cache_read = 0
+    total_cost = 0.0
+    models = set()
+    try:
+        with open(ev_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                try: ev = json.loads(line)
+                except Exception: continue
+                ts = ev.get("ts")
+                if ts:
+                    if started_at is None: started_at = ts
+                    ended_at = ts
+                t = ev.get("type")
+                if t == "session_start":
+                    cwd = ev.get("cwd") or cwd
+                elif t == "interaction_start":
+                    interactions += 1
+                    if first_prompt is None:
+                        p = ev.get("prompt") or ""
+                        first_prompt = p[:60] + ("…" if len(p) > 60 else "")
+                elif t == "turn_start":
+                    turns += 1
+                elif t == "tool_start" or t == "tool_execution_start":
+                    tools += 1
+                elif t == "tool_end" or t == "tool_execution_end":
+                    if ev.get("isError"):
+                        errors += 1
+                elif t in ("step_end", "message_end", "llm_completion"):
+                    usage = ev.get("usage") or {}
+                    total_input += int(usage.get("input") or usage.get("inputTokens") or 0)
+                    total_output += int(usage.get("output") or usage.get("outputTokens") or 0)
+                    total_cache_read += int(usage.get("cacheRead") or usage.get("cacheReadTokens") or 0)
+                    cost_field = usage.get("cost")
+                    if isinstance(cost_field, dict):
+                        total_cost += float(cost_field.get("total") or 0)
+                    elif isinstance(cost_field, (int, float)):
+                        total_cost += float(cost_field)
+                    model = ev.get("model")
+                    if model: models.add(model)
+                    sr = ev.get("stopReason")
+                    if sr == "error": errors += 1
+                    elif sr == "aborted": aborted += 1
+    except Exception:
+        return None
+
+    # ghost session: 零事件或只有 session_start
+    if started_at is None or interactions == 0:
+        return None
+
+    # session id 优先取目录名（session_start 里 sessionId 可能带前缀）
+    sid = session_dir.name
+    cwd_name = Path(cwd).name if cwd else None
+
+    return {
+        "id": sid,
+        "startedAt": started_at,
+        "endedAt": ended_at,
+        "durationMs": max(0, (ended_at or started_at) - started_at),
+        "cwd": cwd,
+        "cwdName": cwd_name,
+        "firstPrompt": first_prompt or "",
+        "interactionCount": interactions,
+        "turnCount": turns,
+        "toolCount": tools,
+        "errorCount": errors,
+        "abortedCount": aborted,
+        "totalInput": total_input,
+        "totalOutput": total_output,
+        "totalCacheRead": total_cache_read,
+        "totalCost": total_cost,
+        "models": sorted(models),
+    }
+
+
+def render_dashboard(summaries: list) -> str:
+    """把 summaries 塞进 dashboard.html 模板。"""
+    now_ms = int(time.time() * 1000)
+    week_ago_ms = now_ms - 7 * 24 * 3600 * 1000
+    week = [s for s in summaries if (s["startedAt"] or 0) >= week_ago_ms]
+    week_sessions = len(week)
+    week_cost = sum(s["totalCost"] for s in week)
+    week_dur = sum(s["durationMs"] for s in week)
+    all_sessions = len(summaries)
+    all_cost = sum(s["totalCost"] for s in summaries)
+
+    summaries_json = json.dumps(summaries, ensure_ascii=False, default=str, allow_nan=False)
+    # 与 trace.html 相同的 script 体防御
+    def _safe(s):
+        return (s.replace("/*__SUMMARIES__*/", "/*__SUMMARIES__ */")
+                 .replace("</", "<\\/")
+                 .replace(" ", "\\u2028")
+                 .replace(" ", "\\u2029"))
+    summaries_json = _safe(summaries_json)
+
+    js = ASSETS_DASH_JS.replace("/*__SUMMARIES__*/[]", summaries_json, 1)
+
+    # dashboard.html 里的 css/js 内容大量含 `{` `}`，用 replace 而非 format 避免冲突
+    out = ASSETS_DASH_HTML
+    for k, v in [
+        ("{css}", ASSETS_DASH_CSS),
+        ("{js}", js),
+        ("{week_sessions}", str(week_sessions)),
+        ("{week_cost}", fmt_money(week_cost)),
+        ("{week_dur}", fmt_ms(week_dur) or "0s"),
+        ("{all_sessions}", str(all_sessions)),
+        ("{all_cost}", fmt_money(all_cost)),
+    ]:
+        out = out.replace(k, v)
+    return out
+
+
+def dashboard_main():
+    if not TRACES.exists():
+        print(f"traces dir not found: {TRACES}", file=sys.stderr); sys.exit(1)
+    session_dirs = [p for p in TRACES.iterdir() if p.is_dir()]
+    summaries = []
+    for d in session_dirs:
+        s = extract_summary(d)
+        if s: summaries.append(s)
+    # 按时间倒序（前端会再排一次，但初始序好看点）
+    summaries.sort(key=lambda x: x["startedAt"] or 0, reverse=True)
+    out = TRACES / "index.html"
+    out.write_text(render_dashboard(summaries), encoding="utf-8")
+    print(f"✓ Wrote {out} ({len(summaries)} sessions)")
+    print(f"  open {out}")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--dashboard":
+        dashboard_main()
+        return
     if len(sys.argv) > 1:
         target = sys.argv[1]
         if target in ("-h", "--help"):
@@ -856,11 +1002,17 @@ _HERE = Path(__file__).parent
 ASSETS_CSS = ""
 ASSETS_JS = ""
 HTML_TPL = ""
+ASSETS_DASH_CSS = ""
+ASSETS_DASH_JS = ""
+ASSETS_DASH_HTML = ""
 try:
     _assets = (_HERE / "viewer" / "assets.json")
     if _assets.exists():
         _a = json.loads(_assets.read_text())
         ASSETS_CSS = _a["css"]; ASSETS_JS = _a["js"]; HTML_TPL = _a["html"]
+        ASSETS_DASH_CSS = _a.get("dash_css", "")
+        ASSETS_DASH_JS = _a.get("dash_js", "")
+        ASSETS_DASH_HTML = _a.get("dash_html", "")
 except Exception:
     pass
 

@@ -19,6 +19,9 @@ def main() -> None:
         "css": (HERE / "viewer.css").read_text(encoding="utf-8"),
         "js": (HERE / "viewer.js").read_text(encoding="utf-8"),
         "html": (HERE / "viewer.html").read_text(encoding="utf-8"),
+        "dash_css": (HERE / "dashboard.css").read_text(encoding="utf-8"),
+        "dash_js": (HERE / "dashboard.js").read_text(encoding="utf-8"),
+        "dash_html": (HERE / "dashboard.html").read_text(encoding="utf-8"),
     }
     target = HERE / "assets.json"
     target.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")

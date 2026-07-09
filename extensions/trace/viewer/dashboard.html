@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Pi Trace · Dashboard</title>
+<style>{css}</style>
+</head>
+<body>
+<div class="dash-topbar">
+  <span class="topbar-icon">⚡</span>
+  <span class="topbar-title">Pi Trace · Dashboard</span>
+  <div class="dash-search"><input type="text" id="dash-search" placeholder="搜索 prompt / session / 项目" /></div>
+</div>
+<div class="dash-kpi">
+  <div class="kpi-row">
+    <div class="kpi-label">本周</div>
+    <div class="kpi-card"><small>Sessions</small><strong>{week_sessions}</strong></div>
+    <div class="kpi-card"><small>Cost</small><strong>{week_cost}</strong></div>
+    <div class="kpi-card"><small>Duration</small><strong>{week_dur}</strong></div>
+  </div>
+  <div class="kpi-row">
+    <div class="kpi-label">全局</div>
+    <div class="kpi-card"><small>Sessions</small><strong>{all_sessions}</strong></div>
+    <div class="kpi-card"><small>Cost</small><strong>{all_cost}</strong></div>
+  </div>
+</div>
+<div class="dash-chips" id="chips"></div>
+<div class="dash-table-wrap">
+  <table class="dash-table" id="dash-table">
+    <thead>
+      <tr>
+        <th class="col-status"></th>
+        <th class="sortable" data-sort="startedAt" data-dir="desc">时间 <span class="sort-ind">↓</span></th>
+        <th class="sortable" data-sort="id">Session <span class="sort-ind">↕</span></th>
+        <th>提问</th>
+        <th class="sortable" data-sort="cwdName">项目 <span class="sort-ind">↕</span></th>
+        <th>规模</th>
+        <th class="sortable num" data-sort="tokens">Tokens <span class="sort-ind">↕</span></th>
+        <th class="sortable num" data-sort="cost">Cost <span class="sort-ind">↕</span></th>
+        <th class="sortable num" data-sort="dur">时长 <span class="sort-ind">↕</span></th>
+      </tr>
+    </thead>
+    <tbody id="dash-tbody"></tbody>
+  </table>
+  <div class="dash-empty" id="dash-empty" style="display:none">没有匹配的 session</div>
+</div>
+<script>{js}</script>
+</body>
+</html>
