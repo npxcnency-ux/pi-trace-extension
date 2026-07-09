@@ -5,6 +5,10 @@
   --row-hover: #f6f8fa; --row-active: #ede7f8;
   --ok: #1a7f37; --err: #cf222e; --warn: #9a6700;
   --badge-bg: #eaeef2; --badge-text: #424a53;
+  /* dashboard 专用状态色：软化的琥珀（错误）/ 中性米色（ok），不用刺眼的红/绿 */
+  --dash-err-soft: #d4a373;      /* 温暖的琥珀，暗示"有事发生但别慌" */
+  --dash-abort-soft: #b5c99a;    /* 淡橄榄，中断 */
+  --dash-ok-soft: #d0d7de;       /* 与 border-strong 同调，几乎不抢眼 */
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -13,6 +17,9 @@
     --row-hover: #1c2128; --row-active: #2d1b4f88;
     --ok: #3fb950; --err: #f85149; --warn: #d29922;
     --badge-bg: #21262d; --badge-text: #8d96a0;
+    --dash-err-soft: #c17c4e;
+    --dash-abort-soft: #7ea057;
+    --dash-ok-soft: #3d444d;
   }
 }
 html, body { margin: 0; font: 13px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif; background: var(--bg); color: var(--text); }
@@ -38,11 +45,11 @@ html, body { margin: 0; font: 13px/1.5 -apple-system, "PingFang SC", system-ui, 
 .kpi-row { display: flex; align-items: stretch; gap: 12px; }
 .kpi-label { display: flex; align-items: center; width: 60px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
 .kpi-card {
-  flex: 0 0 200px; background: var(--panel); border: 1px solid var(--border);
+  flex: 0 0 160px; background: var(--panel); border: 1px solid var(--border);
   border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 2px;
 }
 .kpi-card small { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
-.kpi-card strong { color: var(--text); font-size: 20px; font-weight: 600; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.kpi-card strong { color: var(--text); font-size: 18px; font-weight: 600; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 
 .dash-chips { padding: 12px 20px 6px; display: flex; gap: 6px; flex-wrap: wrap; }
 .chip {
@@ -78,9 +85,9 @@ html, body { margin: 0; font: 13px/1.5 -apple-system, "PingFang SC", system-ui, 
 .col-status { width: 6px; min-width: 6px; padding: 0 !important; }
 .dash-table th.col-status, .dash-table td.col-status { width: 6px; min-width: 6px; padding: 0 !important; background: transparent; }
 .dash-table td.col-status::before { content: "\00a0"; display: inline-block; width: 6px; }
-.dash-table tr.has-err td.col-status { background: var(--err); }
-.dash-table tr.has-abort td.col-status { background: var(--warn); }
-.dash-table tr.all-ok td.col-status { background: var(--ok); }
+.dash-table tr.has-err td.col-status { background: var(--dash-err-soft); }
+.dash-table tr.has-abort td.col-status { background: var(--dash-abort-soft); }
+.dash-table tr.all-ok td.col-status { background: var(--dash-ok-soft); }
 
 .dash-table td.col-time { color: var(--muted); font-family: ui-monospace, Menlo, monospace; white-space: nowrap; }
 .dash-table td.col-id a { color: var(--accent); text-decoration: none; font-family: ui-monospace, Menlo, monospace; }

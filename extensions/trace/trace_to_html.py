@@ -35,6 +35,14 @@ def fmt_money(x):
     return f"${x:.3f}"
 
 
+def fmt_tokens(n):
+    if not n: return "0"
+    if n < 1000: return str(n)
+    if n < 10000: return f"{n/1000:.1f}k"
+    if n < 1_000_000: return f"{round(n/1000)}k"
+    return f"{n/1_000_000:.1f}M"
+
+
 def _find_child_traces_for_tool(session_dir, tool_start_ts, tool_end_ts):
     """在 subagents/ 目录里按时间窗口找属于这次 subagent 工具调用的子 trace。
 
@@ -793,7 +801,9 @@ def extract_summary(session_dir: Path):
     cwd = None
     first_prompt = None
     interactions = turns = tools = 0
-    errors = aborted = 0
+    tool_errors = 0    # tool_end.isError=true
+    step_errors = 0    # step stopReason=error
+    aborted = 0
     total_input = total_output = total_cache_read = 0
     total_cost = 0.0
     models = set()
@@ -822,7 +832,7 @@ def extract_summary(session_dir: Path):
                     tools += 1
                 elif t == "tool_end" or t == "tool_execution_end":
                     if ev.get("isError"):
-                        errors += 1
+                        tool_errors += 1
                 elif t in ("step_end", "message_end", "llm_completion"):
                     usage = ev.get("usage") or {}
                     total_input += int(usage.get("input") or usage.get("inputTokens") or 0)
@@ -836,7 +846,7 @@ def extract_summary(session_dir: Path):
                     model = ev.get("model")
                     if model: models.add(model)
                     sr = ev.get("stopReason")
-                    if sr == "error": errors += 1
+                    if sr == "error": step_errors += 1
                     elif sr == "aborted": aborted += 1
     except Exception:
         return None
@@ -860,7 +870,9 @@ def extract_summary(session_dir: Path):
         "interactionCount": interactions,
         "turnCount": turns,
         "toolCount": tools,
-        "errorCount": errors,
+        "errorCount": tool_errors + step_errors,   # 兼容旧字段：色条判定用总错误
+        "toolErrorCount": tool_errors,             # 新增：只统计 tool 失败
+        "stepErrorCount": step_errors,
         "abortedCount": aborted,
         "totalInput": total_input,
         "totalOutput": total_output,
@@ -875,11 +887,18 @@ def render_dashboard(summaries: list) -> str:
     now_ms = int(time.time() * 1000)
     week_ago_ms = now_ms - 7 * 24 * 3600 * 1000
     week = [s for s in summaries if (s["startedAt"] or 0) >= week_ago_ms]
+    def tokens_of(s): return (s.get("totalInput") or 0) + (s.get("totalOutput") or 0) + (s.get("totalCacheRead") or 0)
     week_sessions = len(week)
     week_cost = sum(s["totalCost"] for s in week)
     week_dur = sum(s["durationMs"] for s in week)
+    week_prompts = sum(s["interactionCount"] for s in week)
+    week_tool_errs = sum(s.get("toolErrorCount", 0) for s in week)
+    week_tokens = sum(tokens_of(s) for s in week)
     all_sessions = len(summaries)
     all_cost = sum(s["totalCost"] for s in summaries)
+    all_prompts = sum(s["interactionCount"] for s in summaries)
+    all_tool_errs = sum(s.get("toolErrorCount", 0) for s in summaries)
+    all_tokens = sum(tokens_of(s) for s in summaries)
 
     summaries_json = json.dumps(summaries, ensure_ascii=False, default=str, allow_nan=False)
     # 与 trace.html 相同的 script 体防御
@@ -898,9 +917,15 @@ def render_dashboard(summaries: list) -> str:
         ("{css}", ASSETS_DASH_CSS),
         ("{js}", js),
         ("{week_sessions}", str(week_sessions)),
+        ("{week_prompts}", str(week_prompts)),
+        ("{week_tool_errs}", str(week_tool_errs)),
+        ("{week_tokens}", fmt_tokens(week_tokens)),
         ("{week_cost}", fmt_money(week_cost)),
         ("{week_dur}", fmt_ms(week_dur) or "0s"),
         ("{all_sessions}", str(all_sessions)),
+        ("{all_prompts}", str(all_prompts)),
+        ("{all_tool_errs}", str(all_tool_errs)),
+        ("{all_tokens}", fmt_tokens(all_tokens)),
         ("{all_cost}", fmt_money(all_cost)),
     ]:
         out = out.replace(k, v)

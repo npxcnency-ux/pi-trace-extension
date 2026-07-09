@@ -15,12 +15,18 @@
   <div class="kpi-row">
     <div class="kpi-label">本周</div>
     <div class="kpi-card"><small>Sessions</small><strong>{week_sessions}</strong></div>
+    <div class="kpi-card"><small>Prompts</small><strong>{week_prompts}</strong></div>
+    <div class="kpi-card"><small>Tool Errors</small><strong>{week_tool_errs}</strong></div>
+    <div class="kpi-card"><small>Tokens</small><strong>{week_tokens}</strong></div>
     <div class="kpi-card"><small>Cost</small><strong>{week_cost}</strong></div>
     <div class="kpi-card"><small>Duration</small><strong>{week_dur}</strong></div>
   </div>
   <div class="kpi-row">
     <div class="kpi-label">全局</div>
     <div class="kpi-card"><small>Sessions</small><strong>{all_sessions}</strong></div>
+    <div class="kpi-card"><small>Prompts</small><strong>{all_prompts}</strong></div>
+    <div class="kpi-card"><small>Tool Errors</small><strong>{all_tool_errs}</strong></div>
+    <div class="kpi-card"><small>Tokens</small><strong>{all_tokens}</strong></div>
     <div class="kpi-card"><small>Cost</small><strong>{all_cost}</strong></div>
   </div>
 </div>
@@ -34,7 +40,7 @@
         <th class="sortable" data-sort="id">Session <span class="sort-ind">↕</span></th>
         <th>提问</th>
         <th class="sortable" data-sort="cwdName">项目 <span class="sort-ind">↕</span></th>
-        <th>规模</th>
+        <th title="Prompts · Turns · Tools">Prompts · Turns · Tools</th>
         <th class="sortable num" data-sort="tokens">Tokens <span class="sort-ind">↕</span></th>
         <th class="sortable num" data-sort="cost">Cost <span class="sort-ind">↕</span></th>
         <th class="sortable num" data-sort="dur">时长 <span class="sort-ind">↕</span></th>
