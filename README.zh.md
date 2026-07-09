@@ -17,6 +17,8 @@
 
 数据全程留在本机。
 
+![Pi Trace Dashboard](./examples/dashboard.png)
+
 ![Pi Trace 截图](./examples/screenshot.png)
 
 | pi 自带的 `session.jsonl` | pi-trace-extension |
@@ -218,6 +220,7 @@ extensions/trace/index.ts
 pi-trace-extension/
 ├── README.md / README.zh.md / LICENSE / package.json
 ├── examples/
+│   ├── dashboard.png
 │   └── screenshot.png
 └── extensions/
     └── trace/
