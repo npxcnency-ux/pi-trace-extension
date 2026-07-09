@@ -352,6 +352,23 @@ def _extract_subagent_failures(result_preview):
         out[f"_idx_{idx}"] = msg
     return out
 
+def _attach_point_event(node, cur_interaction, cur_turn_key, turns, session_orphans):
+    """按时间归属 compact / thinking_change 这类点事件到最近的活跃层级。
+
+    优先级：当前 turn > 当前 interaction > session 孤儿池（末尾挂 session 根）。
+    """
+    if cur_turn_key and cur_turn_key in turns:
+        parent = turns[cur_turn_key]
+        node["parent_id"] = parent["id"]
+        parent["children"].append(node)
+    elif cur_interaction:
+        node["parent_id"] = cur_interaction["id"]
+        cur_interaction["children"].append(node)
+    else:
+        node["parent_id"] = "session"
+        session_orphans.append(node)
+
+
 def build_tree(events, session_dir=None):
     interactions = []
     turns = {}     # 复合 key: (epoch, iid, turn_seq) -> turn node。turn_seq 是该 interaction 内 turn 的出现序号
@@ -367,7 +384,10 @@ def build_tree(events, session_dir=None):
     # session_dir 用于定位子 trace 目录（subagents/<childTraceId>/）
     sessionDir = session_dir  # noqa: N806 —— 与 TS 代码变量名对齐方便阅读
     model_changes = []  # 全局 model_change 历史，每条 {ts, model, previousModel, source}
+    thinking_changes = []  # 全局 thinking_change 历史
     sm = {"sessionId": None, "cwd": None, "model": None, "start_ts": None, "end_ts": None}
+    session_orphans = []  # compact / thinking_change 在 interaction 之前发生时的暂存，末尾挂 session 根
+    compact_seq = 0  # compact 事件序号，用于 id 去重（同 ts 出现两次时防冲突）
 
     def ensure_turn(ts, ti):
         """没有显式 turn_start 时也能给 step/tool 找到 turn 父节点。
@@ -674,6 +694,31 @@ def build_tree(events, session_dir=None):
                 # 把当前 turn 标记为 "model 切换发生过"——便于 UI 显示
                 if cur_turn_key and cur_turn_key in turns:
                     turns[cur_turn_key]["data"].setdefault("modelChanges", []).append(entry)
+        elif t == "compact":
+            # 按时间归属：优先当前 turn，退回当前 interaction，最后 session 根
+            compact_seq += 1
+            node = {
+                "id": f"compact-{epoch}-{compact_seq}", "parent_id": None,
+                "type": "compact", "name": "compact", "icon": "💾",
+                "start": ts, "end": ts, "status": "ok",
+                "data": {
+                    "turnIndex": e.get("turnIndex"),
+                    "compactionEntry": e.get("compactionEntry"),
+                    "fromExtension": e.get("fromExtension"),
+                },
+                "children": [],
+            }
+            _attach_point_event(node, cur, cur_turn_key, turns, session_orphans)
+        elif t == "thinking_change":
+            prev = e.get("previousLevel"); nxt = e.get("level")
+            entry = {"ts": ts, "previousLevel": prev, "level": nxt, "turnIndex": e.get("turnIndex")}
+            thinking_changes.append(entry)
+            # 冒泡到 turn / interaction，供右侧详情按层级展示
+            # 注意：同一条 entry 同时进 turn 和 interaction 的 list，两者展示时都能看到——这是期望的
+            if cur_turn_key and cur_turn_key in turns:
+                turns[cur_turn_key]["data"].setdefault("thinkingChanges", []).append(entry)
+            if cur:
+                cur["data"].setdefault("thinkingChanges", []).append(entry)
         elif t == "session_shutdown":
             sm["end_ts"] = ts
 
@@ -701,9 +746,12 @@ def build_tree(events, session_dir=None):
             "model": sm.get("model"),
             "interactionCount": len(interactions),
             "modelChanges": model_changes,  # 全局 model 切换历史
+            "thinkingChanges": thinking_changes,  # 全局 thinking level 切换历史
             "totalUsage": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":0},
         },
-        "children": interactions,
+        # 孤儿点事件（compact/thinking_change 早于第一个 interaction）+ 正常 interactions
+        # 按 start ts 排序保证时间顺序展示
+        "children": sorted(session_orphans + interactions, key=lambda n: n.get("start") or 0),
     }
     for inter in interactions:
         for k in ("input","output","cacheRead","cacheWrite","cost"):

@@ -259,6 +259,20 @@ function makeBadge(label, value, cls) {
   return b;
 }
 
+function renderThinkingList(changes) {
+  // 复用 model changes 的 fc-list 样式：一行一次切换
+  const wrap = el("div", "fc-list");
+  changes.forEach((tc) => {
+    const row = el("div");
+    const tsStr = fmtIso(tc.ts);
+    const prev = tc.previousLevel || "?";
+    const nxt = tc.level || "?";
+    setText(row, `${tsStr}  ${prev}  →  ${nxt}`);
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
 function renderDetail(node) {
   const pane = document.getElementById("detail-pane");
   pane.innerHTML = "";
@@ -369,6 +383,12 @@ function renderDetail(node) {
       });
       section("models", "Model Changes", wrap, node.data.modelChanges.length);
     }
+    // thinking level 切换历史
+    if (node.data.thinkingChanges && node.data.thinkingChanges.length) {
+      section("thinking", "Thinking Changes",
+        renderThinkingList(node.data.thinkingChanges),
+        node.data.thinkingChanges.length);
+    }
     section("metadata", "Metadata", renderJsonRoot({
       sessionId: node.data.sessionId, cwd: node.data.cwd, model: node.data.model,
       duration: fmtMs(node.duration_ms),
@@ -429,6 +449,11 @@ function renderDetail(node) {
       });
       section("models", "Model Changes", wrap, node.data.modelChanges.length);
     }
+    if (node.data.thinkingChanges && node.data.thinkingChanges.length) {
+      section("thinking", "Thinking Changes",
+        renderThinkingList(node.data.thinkingChanges),
+        node.data.thinkingChanges.length);
+    }
     section("metadata", "Metadata", renderJsonRoot({
       interactionId: node.data.interactionId,
       systemPromptLength: node.data.systemPromptLength,
@@ -449,6 +474,11 @@ function renderDetail(node) {
         wrap.appendChild(row);
       });
       section("models", "Model Changes (this turn)", wrap, node.data.modelChanges.length);
+    }
+    if (node.data.thinkingChanges && node.data.thinkingChanges.length) {
+      section("thinking", "Thinking Changes (this turn)",
+        renderThinkingList(node.data.thinkingChanges),
+        node.data.thinkingChanges.length);
     }
     section("metadata", "Metadata", renderJsonRoot({
       turnIndex: node.data.turnIndex,
@@ -578,6 +608,21 @@ function renderDetail(node) {
       agent: d.agent, agentSource: d.agentSource, model: d.model,
       exitCode: d.exitCode, stopReason: d.stopReason, step: d.step, usage: d.usage,
       childTraceId: d.childTraceId,
+    }));
+  } else if (t === "compact") {
+    const d = node.data || {};
+    // compactionEntry 通常是字符串（Python 端 str() 序列化过），也可能是 dict
+    const entry = d.compactionEntry;
+    if (entry) {
+      if (typeof entry === "string") {
+        section("entry", "Compaction Entry", textBlock(entry));
+      } else {
+        section("entry", "Compaction Entry", renderJsonRoot(entry));
+      }
+    }
+    section("metadata", "Metadata", renderJsonRoot({
+      turnIndex: d.turnIndex,
+      fromExtension: d.fromExtension,
     }));
   }
 
