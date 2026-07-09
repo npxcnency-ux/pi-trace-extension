@@ -19,8 +19,6 @@ Everything stays on your machine.
 
 ![Pi Trace Dashboard](./examples/dashboard.png)
 
-![Pi Trace Screenshot](./examples/screenshot.png)
-
 | pi's built-in `session.jsonl` | pi-trace-extension |
 | --- | --- |
 | Conversation view (messages in order) | Execution view (steps + tools + sub-agents as a tree) |
@@ -220,8 +218,7 @@ No other dependencies. Renderer uses Python stdlib only; viewer uses no JS frame
 pi-trace-extension/
 ├── README.md / README.zh.md / LICENSE / package.json
 ├── examples/
-│   ├── dashboard.png
-│   └── screenshot.png
+│   └── dashboard.png
 └── extensions/
     └── trace/
         ├── index.ts            # pi extension entry (event capture, /trace command)

@@ -34,7 +34,7 @@
     "extensions": [
       "./extensions"
     ],
-    "image": "https://raw.githubusercontent.com/npxcnency-ux/pi-trace-extension/main/examples/screenshot.png"
+    "image": "https://raw.githubusercontent.com/npxcnency-ux/pi-trace-extension/main/examples/dashboard.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

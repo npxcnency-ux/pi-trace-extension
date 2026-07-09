@@ -19,8 +19,6 @@
 
 ![Pi Trace Dashboard](./examples/dashboard.png)
 
-![Pi Trace 截图](./examples/screenshot.png)
-
 | pi 自带的 `session.jsonl` | pi-trace-extension |
 | --- | --- |
 | 对话视角（按消息顺序） | 执行视角（step + 工具 + 子 agent 组成的树） |
@@ -220,8 +218,7 @@ extensions/trace/index.ts
 pi-trace-extension/
 ├── README.md / README.zh.md / LICENSE / package.json
 ├── examples/
-│   ├── dashboard.png
-│   └── screenshot.png
+│   └── dashboard.png
 └── extensions/
     └── trace/
         ├── index.ts            # pi 扩展入口（事件采集、/trace 命令）
