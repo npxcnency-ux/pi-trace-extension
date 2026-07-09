@@ -77,14 +77,49 @@ function selectNode(id) {
 }
 
 function applySearch(q) {
-  q = q.toLowerCase().trim();
+  filterState.query = (q || "").toLowerCase().trim();
+  applyFilters();
+}
+
+// 页面级过滤状态
+const filterState = { query: "", onlyErrors: false };
+
+function isErrLike(n) { return n && (n.status === "error" || n.status === "aborted"); }
+
+function nodeMatchesQuery(n, q) {
+  if (!q) return true;
+  const hay = ((n.name||"") + " " + (n.data && n.data.toolName || "") + " " + (n.data && n.data.prompt || "") + " " + n.type).toLowerCase();
+  return hay.includes(q);
+}
+
+// 自底向上标记 keep：自身命中 OR 后代有命中
+function markKeep(n, q, onlyErrors) {
+  const selfHit = nodeMatchesQuery(n, q) && (!onlyErrors || isErrLike(n));
+  let childHit = false;
+  (n.children || []).forEach(c => { if (markKeep(c, q, onlyErrors)) childHit = true; });
+  const keep = selfHit || childHit;
+  n._keep = keep;
+  return keep;
+}
+
+function applyFilters() {
+  const q = filterState.query;
+  const onlyErr = filterState.onlyErrors;
+  // 无任何过滤时直接全显，省一次 DFS
+  if (!q && !onlyErr) {
+    document.querySelectorAll(".node-row").forEach(row => { row.style.display = ""; });
+    return;
+  }
+  markKeep(TRACE_DATA, q, onlyErr);
   document.querySelectorAll(".node-row").forEach(row => {
-    const id = row.dataset.nodeId;
-    const n = NODE_INDEX[id]; if (!n) return;
-    if (!q) { row.style.display = ""; return; }
-    const hay = ((n.name||"") + " " + (n.data && n.data.toolName || "") + " " + (n.data && n.data.prompt || "") + " " + n.type).toLowerCase();
-    row.style.display = hay.includes(q) ? "" : "none";
+    const n = NODE_INDEX[row.dataset.nodeId];
+    row.style.display = (n && n._keep) ? "" : "none";
   });
+}
+
+function hasAnyErrors(n) {
+  if (isErrLike(n)) return true;
+  return (n.children || []).some(hasAnyErrors);
 }
 
 let __jsonLine = 0;
@@ -594,6 +629,23 @@ window.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll(".node-children").forEach((c, i) => { if (i > 0) c.classList.add("hidden"); });
     document.querySelectorAll(".node-row").forEach((r, i) => { if (i > 0 && !r.classList.contains("leaf")) r.classList.add("collapsed"); });
   });
+
+  const onlyErrBtn = document.getElementById("only-errors");
+  if (!hasAnyErrors(TRACE_DATA)) {
+    onlyErrBtn.disabled = true;
+    onlyErrBtn.title = "此 trace 无错误节点";
+  } else {
+    onlyErrBtn.addEventListener("click", () => {
+      filterState.onlyErrors = !filterState.onlyErrors;
+      onlyErrBtn.classList.toggle("active", filterState.onlyErrors);
+      // 打开时强制全展开，避免折叠住的错误节点被 display:none 掩盖
+      if (filterState.onlyErrors) {
+        document.querySelectorAll(".node-children").forEach(c => c.classList.remove("hidden"));
+        document.querySelectorAll(".node-row").forEach(r => r.classList.remove("collapsed"));
+      }
+      applyFilters();
+    });
+  }
 
   const cid = document.getElementById("copy-id");
   cid.addEventListener("click", (e) => {
