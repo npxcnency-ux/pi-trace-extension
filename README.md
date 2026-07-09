@@ -80,6 +80,15 @@ python3 ~/.pi/agent/npm/pi-trace-extension/extensions/trace/trace_to_html.py [se
 # Omit the argument to pick the most recent session
 ```
 
+**Cross-session dashboard** — a top-level index of every session on disk:
+
+```bash
+python3 ~/.pi/agent/npm/pi-trace-extension/extensions/trace/trace_to_html.py --dashboard
+# Writes ~/.pi/agent/traces/index.html
+```
+
+The dashboard shows: week + all-time KPI cards (sessions / cost / duration); a sortable, searchable table (time, session id, first prompt, project, scale, tokens, cost, duration) with a left-side color bar per row (green = ok, yellow = aborted, red = has errors); and project-name chips for quick filtering. Click a session id → jump to that session's `trace.html`.
+
 * * *
 
 ## The pipeline
@@ -126,6 +135,7 @@ A three-pane Langfuse-style viewer. **Single HTML file, no CDN, no fonts loaded 
 Specific affordances:
 
 - **`aborted` vs `error` vs `ok`** — distinguishes user-cancelled (`⏹` yellow) from real errors (`❌` red). 429 retries that eventually succeed are correctly classified as `ok`.
+- **"Only errors" filter** — a toggle in the tree toolbar keeps only `error` / `aborted` nodes and their ancestor path, so long sessions collapse to just the failing branches. Combines with the text search box (AND). Disabled on error-free sessions.
 - **Sub-agent has its own trace** — when an agent spawns a sub-agent (single / parallel / chain), the child writes its own `events.jsonl` under `subagents/<child-id>/` and gets its own rendered `trace.html`. The parent's sub-agent-result node shows the child's turns / steps / tools inline (rebuilt from messages) and offers an "Open child trace" button to jump into the child's full report. Parallel sub-agents are matched to their on-disk traces by sessionId where available.
 - **Auto-retry detection** — when a turn re-enters with the same `turnIndex` (e.g. framework retried after a 429), the second occurrence is labeled `turn N (retry #1)` instead of collapsing the two into one node.
 - **Full LLM input payload** — `model`, every `messages[]` entry (including `reasoning_content`, `tool_calls`, `tool_result`), the registered `tools[]` schema, and request-level params (max_tokens, temperature, etc.). Long strings are truncated to 8 KB; the truncated length is shown.
@@ -184,7 +194,7 @@ This extension covers a smaller scope than the established players. Honestly:
 | Cost | Free, MIT | Free tier + paid | Paid | Free OSS |
 | Multi-user dashboard | No | Yes | Yes | Yes |
 | Alerting / SLO | No | Yes (paid) | Yes | Yes |
-| Cross-session aggregation | No | Yes | Yes | Yes |
+| Cross-session aggregation | Local dashboard (`--dashboard`) | Yes | Yes | Yes |
 | pi-agent native | Yes | Adapter possible | No | Adapter possible |
 | Time to first chart | Seconds | Minutes (sign-up) | Minutes | Minutes |
 
@@ -215,9 +225,12 @@ pi-trace-extension/
         ├── trace_to_html.py    # renderer (events.jsonl → trace.html)
         └── viewer/
             ├── assets.json     # bundled css + js + html (runtime-loaded, committed)
-            ├── viewer.css      # source
-            ├── viewer.html     # source
-            ├── viewer.js       # source
+            ├── viewer.css      # source (single-session viewer)
+            ├── viewer.html
+            ├── viewer.js
+            ├── dashboard.css   # source (cross-session dashboard)
+            ├── dashboard.html
+            ├── dashboard.js
             └── build.py        # rebuild assets.json after editing the sources
 ```
 
@@ -273,7 +286,7 @@ PR bar:
 ## Roadmap
 
 - [ ] CLI scrubber: `python3 trace_to_html.py <session> --redact-prompts`
-- [ ] Multi-session index page (`~/.pi/agent/traces/index.html`)
+- [x] Multi-session index page (`~/.pi/agent/traces/index.html`) — v0.1.7
 - [ ] Optional OTLP exporter (opt-in env var) for forwarding to Langfuse / Phoenix self-hosted
 - [ ] Auto-rotation when `events.jsonl` exceeds N MB
 

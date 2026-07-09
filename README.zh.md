@@ -80,6 +80,15 @@ python3 ~/.pi/agent/npm/pi-trace-extension/extensions/trace/trace_to_html.py [se
 # 不传参数则渲染最新一个
 ```
 
+**跨会话 dashboard** —— 磁盘上所有 session 的顶层索引：
+
+```bash
+python3 ~/.pi/agent/npm/pi-trace-extension/extensions/trace/trace_to_html.py --dashboard
+# 输出到 ~/.pi/agent/traces/index.html
+```
+
+Dashboard 包含：本周 + 全局的 KPI 卡片（sessions / cost / duration）；可搜索/可排序的表格（时间、session id、首个提问、项目、规模、tokens、成本、时长），每行左侧一根状态色条（绿 = ok、黄 = aborted、红 = 有错误）；顶部有项目名 chip 用于快速筛选。点击 session id → 跳到该会话的 `trace.html`。
+
 * * *
 
 ## 流水线
@@ -126,6 +135,7 @@ extensions/trace/index.ts
 具体能力：
 
 - **`aborted` / `error` / `ok` 三态** — 用户取消（`⏹` 黄）vs 真错误（`❌` 红）vs 正常。pi 撞 429 自动 retry 后最终成功的，整体仍计为 `ok`，不会被中间失败误判。
+- **「只看错误」过滤** — 树工具栏一个 toggle，勾选后只保留 `error` / `aborted` 节点及其从根到叶的完整祖先路径，长 session 一次点击聚焦失败分支。与文本搜索框叠加（AND）。无错误 session 里按钮禁用。
 - **子 agent 有独立 trace** — 派生子 agent（single / parallel / chain）时，子进程把自己的 `events.jsonl` 写到 `subagents/<child-id>/`，并独立生成一份 `trace.html`。父 trace 的子 agent 节点会内联展示子 agent 的 turn / step / tool（从 messages 重建），并提供「Open child trace」跳转按钮。parallel 模式下尽量按 sessionId 匹配父子关系。
 - **Retry 检测** — 同一个 `turnIndex` 在一个 interaction 内出现第二次（比如 429 后框架重试），节点名会标记成 `turn N (retry #1)`，不会被折叠成同一个 turn。
 - **完整 LLM input payload** — `model`、所有 `messages[]` 条目（含 `reasoning_content`、`tool_calls`、`tool_result`）、注册过的 `tools[]` schema、请求级参数（max_tokens、temperature 等）。超长字符串截断到 8 KB，截断长度会显示出来。
@@ -184,7 +194,7 @@ extensions/trace/index.ts
 | 成本 | 免费、MIT | 免费档 + 付费 | 付费 | 免费 OSS |
 | 多人 dashboard | 否 | 是 | 是 | 是 |
 | 告警 / SLO | 否 | 是（付费） | 是 | 是 |
-| 跨 session 聚合 | 否 | 是 | 是 | 是 |
+| 跨 session 聚合 | 本地 dashboard（`--dashboard`） | 是 | 是 | 是 |
 | pi-agent 原生支持 | 是 | 可适配 | 否 | 可适配 |
 | 看到第一张图的时间 | 几秒 | 几分钟（注册） | 几分钟 | 几分钟 |
 
@@ -215,9 +225,12 @@ pi-trace-extension/
         ├── trace_to_html.py    # 渲染器（events.jsonl → trace.html）
         └── viewer/
             ├── assets.json     # 打包后的 css + js + html（运行时加载，仓库提交）
-            ├── viewer.css      # 源
-            ├── viewer.html     # 源
-            ├── viewer.js       # 源
+            ├── viewer.css      # 源（单会话查看器）
+            ├── viewer.html
+            ├── viewer.js
+            ├── dashboard.css   # 源（跨会话 dashboard）
+            ├── dashboard.html
+            ├── dashboard.js
             └── build.py        # 修改源后重新打包 assets.json
 ```
 
@@ -273,7 +286,7 @@ PR 门槛：
 ## 路线图
 
 - [ ] CLI 脱敏工具：`python3 trace_to_html.py <session> --redact-prompts`
-- [ ] 多 session 索引页（`~/.pi/agent/traces/index.html`）
+- [x] 多 session 索引页（`~/.pi/agent/traces/index.html`）—— v0.1.7
 - [ ] 可选 OTLP exporter（opt-in 环境变量），转发到 Langfuse / Phoenix 自建
 - [ ] `events.jsonl` 超过 N MB 自动归档
 
