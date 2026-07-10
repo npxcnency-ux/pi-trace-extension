@@ -72,6 +72,45 @@ export default function (pi: ExtensionAPI) {
 	let sessionDir = "";
 	let writeStream: fs.WriteStream | null = null;
 
+	// ─── Fail-open 基础设施 ──────────────────────────────────────────────────
+	// disabled 是单向门。进入后本进程不再尝试恢复。
+	// 理由：trace 组件的可用性 < 宿主 pi 稳定性。误伤一个 session 的 trace 数据，
+	// 比"引入重试 → 引入新崩溃路径"更可接受。任何 handler 抛错或 stream 出错，
+	// 都会走 markDisabled 进入终态，之后所有事件静默丢弃，pi 主进程不受影响。
+	let disabled = false;
+
+	function markDisabled(reason: string, err: unknown): void {
+		if (disabled) return;             // 只降级一次
+		disabled = true;
+		// 用 destroy 而不是 end：已经在错误路径，不再尝试 flush（flush 会再触发 error 事件）
+		try { writeStream?.destroy(); } catch { /* ignore */ }
+		writeStream = null;
+		// 内层 try 防 console.error 本身抛（罕见但存在，例如恶意 Proxy）
+		try {
+			console.error(`[pi-trace] disabled: ${reason}`, err);
+		} catch { /* ignore */ }
+	}
+
+	// 统一包裹每一个 pi.on handler：
+	// - 同步 throw 被 try 抓住 → markDisabled
+	// - async handler 返回的 Promise reject → .catch 兜住 → markDisabled
+	//   （TS 允许 async () => void 传给 () => void 类型，类型漏检时运行时兜底）
+	function safeHandler<T>(name: string, fn: (e: T, ctx?: any) => void | Promise<void>) {
+		return (e: T, ctx?: any) => {
+			if (disabled) return;
+			try {
+				const ret = fn(e, ctx);
+				if (ret && typeof (ret as any).then === "function") {
+					(ret as Promise<void>).catch(rejErr =>
+						markDisabled(`async handler ${name} rejected`, rejErr));
+				}
+			} catch (err) {
+				markDisabled(`handler ${name} threw`, err);
+			}
+		};
+	}
+	// ─────────────────────────────────────────────────────────────────────────
+
 	// 状态跟踪
 	let currentTurn = 0;
 	let currentStep = 0; // 全局递增的 step 索引
@@ -115,11 +154,13 @@ export default function (pi: ExtensionAPI) {
 	}> = [];
 
 	const writeEvent = (event: TraceEvent) => {
-		if (!writeStream) return;
+		if (disabled || !writeStream) return;
 		try {
 			writeStream.write(JSON.stringify(event) + "\n");
 		} catch (err) {
-			console.error("[trace] write error:", err);
+			// write 通常异步，但 JSON.stringify 可能同步抛（循环引用等）。
+			// 任一失败都进入 disabled 终态。
+			markDisabled("writeEvent threw", err);
 		}
 	};
 
@@ -364,7 +405,7 @@ export default function (pi: ExtensionAPI) {
 	// Session lifecycle
 	// ========================================================================
 
-	pi.on("session_start", (event, ctx) => {
+	pi.on("session_start", safeHandler("session_start", (event: any, ctx: any) => {
 		const ev = event as any;
 		// 检测是否为 subagent 进程：subagent 的 sessionFile == null（因为 --no-session）
 		const sessionFile = ctx.sessionManager?.getSessionFile?.();
@@ -384,6 +425,8 @@ export default function (pi: ExtensionAPI) {
 			fs.mkdirSync(sessionDir, { recursive: true });
 			traceFile = path.join(sessionDir, "events.jsonl");
 			writeStream = fs.createWriteStream(traceFile, { flags: "a" });
+			// 关键：装 error listener，否则异步写盘错误会变 uncaughtException 崩 pi
+			writeStream.on("error", (err) => markDisabled("stream error (subagent)", err));
 			// 子 agent 自己也可能再 spawn 子 agent —— 把环境变量更新到自己的目录，
 			// 否则孙子 agent 会读到祖父的 parentDir，写到顶层 subagents/ 同级而非嵌套
 			process.env.PI_TRACE_PARENT_DIR = sessionDir;
@@ -395,6 +438,7 @@ export default function (pi: ExtensionAPI) {
 			fs.mkdirSync(sessionDir, { recursive: true });
 			traceFile = path.join(sessionDir, "events.jsonl");
 			writeStream = fs.createWriteStream(traceFile, { flags: "a" });
+			writeStream.on("error", (err) => markDisabled("stream error", err));
 			// 通过环境变量让子进程知道父 session 目录
 			// （spawn subagent 时会 inherit env，子 agent trace 扩展读此变量写子目录）
 			process.env.PI_TRACE_PARENT_DIR = sessionDir;
@@ -409,7 +453,7 @@ export default function (pi: ExtensionAPI) {
 			isSubagent: isSubagent || undefined,
 			parentDir: isSubagent ? process.env.PI_TRACE_PARENT_DIR : undefined,
 		}));
-	});
+	}));
 
 	// ========================================================================
 	// HTML 渲染：spawn python3 trace_to_html.py，把 events.jsonl 转成可视化 HTML
@@ -459,13 +503,17 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", safeHandler("session_shutdown", () => {
 		writeEvent(baseEvent({ type: "session_shutdown" }));
-		// end() 是异步 flush，回调里再置 null 保证最后几条事件落盘
-		writeStream?.end(() => { writeStream = null; });
+		// H1 修复：立即置 null 屏蔽后续写入，避免 renderHtml(sync) 阻塞期间被
+		// 其他 handler（如未收尾的 tool_end）写到已 end() 的 stream 上触发
+		// ERR_STREAM_WRITE_AFTER_END → uncaughtException 崩 pi
+		const stream = writeStream;
+		writeStream = null;
+		try { stream?.end(); } catch { /* ignore */ }
 		// 兜底：session 退出时同步生成一次 HTML（不打开浏览器）
 		try { renderHtml({ open: false, sync: true }); } catch { /* silent */ }
-	});
+	}));
 
 	// 把上游 event 对象展开但保护 baseEvent 设的关键字段（type/ts/sessionId/turnIndex/stepIndex）
 	const spreadEvent = (e: any): Record<string, unknown> => {
@@ -475,23 +523,23 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	// pi 的扩展事件名是 "model_select"（不是 "model_change"——后者是 session.jsonl 里的持久化类型）
-	pi.on("model_select", (event) => {
+	pi.on("model_select", safeHandler("model_select", (event: any) => {
 		writeEvent(baseEvent({ type: "model_change", ...spreadEvent(event) }));
-	});
+	}));
 
-	pi.on("thinking_level_select", (event) => {
+	pi.on("thinking_level_select", safeHandler("thinking_level_select", (event: any) => {
 		writeEvent(baseEvent({ type: "thinking_change", ...spreadEvent(event) }));
-	});
+	}));
 
-	pi.on("session_compact", (event) => {
+	pi.on("session_compact", safeHandler("session_compact", (event: any) => {
 		writeEvent(baseEvent({ type: "compact", ...spreadEvent(event) }));
-	});
+	}));
 
 	// ========================================================================
 	// Turn lifecycle
 	// ========================================================================
 
-	pi.on("turn_start", (event) => {
+	pi.on("turn_start", safeHandler("turn_start", (event: any) => {
 		currentTurn = event.turnIndex;
 		turnStartTime = Date.now();
 		turnStartStep = currentStep;
@@ -507,9 +555,9 @@ export default function (pi: ExtensionAPI) {
 			type: "turn_start",
 			interactionId,
 		}));
-	});
+	}));
 
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", safeHandler("before_agent_start", (event: any) => {
 		// 这是“新 interaction 开始”的信号
 		interactionId += 1;
 		interactionStartTime = Date.now();
@@ -556,9 +604,9 @@ export default function (pi: ExtensionAPI) {
 			skillsLoaded: skillsInfo && skillsInfo.length > 0 ? skillsInfo : undefined,
 			slashCommand,
 		}));
-	});
+	}));
 
-	pi.on("turn_end", (event) => {
+	pi.on("turn_end", safeHandler("turn_end", (event: any) => {
 		const now = Date.now();
 		const message = event.message as any;
 		const stepCount = currentStep - turnStartStep;
@@ -607,13 +655,13 @@ export default function (pi: ExtensionAPI) {
 			type: "turn_end",
 			durationMs: now - turnStartTime,
 		}));
-	});
+	}));
 
 	// ========================================================================
 	// Step lifecycle (一个 step = 一次 LLM 调用 + 它触发的工具)
 	// ========================================================================
 
-	pi.on("before_provider_request", (event) => {
+	pi.on("before_provider_request", safeHandler("before_provider_request", (event: any) => {
 		// step 开始
 		stepStartTime = Date.now();
 		providerRequestStart = stepStartTime;
@@ -641,9 +689,9 @@ export default function (pi: ExtensionAPI) {
 			input: inputPayload,
 		}));
 
-	});
+	}));
 
-	pi.on("after_provider_response", (event) => {
+	pi.on("after_provider_response", safeHandler("after_provider_response", (event: any) => {
 		const now = Date.now();
 		writeEvent(baseEvent({
 			ts: now,
@@ -654,7 +702,7 @@ export default function (pi: ExtensionAPI) {
 			isError: event.status >= 400,
 			rateLimit: event.headers?.["x-ratelimit-remaining-requests"],
 		}));
-	});
+	}));
 
 	const rememberStreamThinking = (candidate: unknown) => {
 		if (typeof candidate !== "string" || candidate.length === 0) return;
@@ -662,7 +710,7 @@ export default function (pi: ExtensionAPI) {
 		if (candidate.length >= streamThinking.length) streamThinking = candidate;
 	};
 
-	pi.on("message_update", (event) => {
+	pi.on("message_update", safeHandler("message_update", (event: any) => {
 		const assistantEvent = (event as any).assistantMessageEvent;
 		if (!assistantEvent || typeof assistantEvent !== "object") return;
 		const eventType = assistantEvent.type;
@@ -691,9 +739,9 @@ export default function (pi: ExtensionAPI) {
 			rememberStreamThinking(parts.thinking);
 			if (parts.thinkingRedacted) streamThinkingRedacted = true;
 		}
-	});
+	}));
 
-	pi.on("message_end", (event) => {
+	pi.on("message_end", safeHandler("message_end", (event: any) => {
 		const message = event.message as any;
 		// 只关心 assistant 消息（user/toolResult 不是一个推理 step）
 		if (message?.role !== "assistant") return;
@@ -764,13 +812,13 @@ export default function (pi: ExtensionAPI) {
 			errorMessage: message.errorMessage || undefined,
 			diagnostics: message.diagnostics || undefined,
 		}));
-	});
+	}));
 
 	// ========================================================================
 	// Tool execution (在 step 内部)
 	// ========================================================================
 
-	pi.on("tool_execution_start", (event) => {
+	pi.on("tool_execution_start", safeHandler("tool_execution_start", (event: any) => {
 		const now = Date.now();
 		toolStartTimes.set(event.toolCallId, now);
 		const stepIdx = toolCallToStep.get(event.toolCallId) ?? currentStep;
@@ -783,9 +831,9 @@ export default function (pi: ExtensionAPI) {
 			toolName: event.toolName,
 			args: event.args,
 		}));
-	});
+	}));
 
-	pi.on("tool_execution_end", (event) => {
+	pi.on("tool_execution_end", safeHandler("tool_execution_end", (event: any) => {
 		const now = Date.now();
 		const start = toolStartTimes.get(event.toolCallId);
 		toolStartTimes.delete(event.toolCallId);
@@ -822,21 +870,29 @@ export default function (pi: ExtensionAPI) {
 				const toolStartTs = start ?? now;
 				const subagentDir = sessionDir ? path.join(sessionDir, "subagents") : null;
 				const childTraces: { id: string; dir: string; startTs: number }[] = [];
-				if (subagentDir && fs.existsSync(subagentDir)) {
-					for (const childId of fs.readdirSync(subagentDir)) {
-						const childEventsFile = path.join(subagentDir, childId, "events.jsonl");
-						if (!fs.existsSync(childEventsFile)) continue;
-						const firstLine = readFirstLine(childEventsFile);
-						if (!firstLine) continue;
-						try {
-							const firstEvent = JSON.parse(firstLine);
-							const childTs = firstEvent?.ts ?? 0;
-							if (childTs >= toolStartTs && childTs <= now) {
-								childTraces.push({ id: childId, dir: path.join(subagentDir, childId), startTs: childTs });
-							}
-						} catch { /* ignore parse errors */ }
+				// C3 修复：TOCTOU 保护——existsSync 到 readdirSync 之间目录可能被删/权限变更。
+				// 局部 try/catch 让子目录扫描失败时只丢这次 subagent 结构信息，
+				// 而不是升级到 markDisabled 让整个 session 后续事件全丢。
+				try {
+					if (subagentDir && fs.existsSync(subagentDir)) {
+						for (const childId of fs.readdirSync(subagentDir)) {
+							const childEventsFile = path.join(subagentDir, childId, "events.jsonl");
+							if (!fs.existsSync(childEventsFile)) continue;
+							const firstLine = readFirstLine(childEventsFile);
+							if (!firstLine) continue;
+							try {
+								const firstEvent = JSON.parse(firstLine);
+								const childTs = firstEvent?.ts ?? 0;
+								if (childTs >= toolStartTs && childTs <= now) {
+									childTraces.push({ id: childId, dir: path.join(subagentDir, childId), startTs: childTs });
+								}
+							} catch { /* ignore parse errors */ }
+						}
+						childTraces.sort((a, b) => a.startTs - b.startTs);
 					}
-					childTraces.sort((a, b) => a.startTs - b.startTs);
+				} catch (err) {
+					// TOCTOU 或权限异常：接受结果不完整，childTraces 保持已扫到的部分
+					try { console.error("[pi-trace] subagent scan partial failure:", err); } catch { /* ignore */ }
 				}
 
 				// 子 trace 按 ID 匹配（如果 result 里有 sessionId/childSessionId），否则按
@@ -923,7 +979,7 @@ export default function (pi: ExtensionAPI) {
 				}));
 			}
 		}
-	});
+	}));
 
 	console.log(`[pi-trace] extension loaded → ${TRACE_DIR} · use /trace to render HTML`);
 }
