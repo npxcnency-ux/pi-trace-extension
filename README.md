@@ -255,6 +255,8 @@ export PI_TRACE_PYTHON=/opt/homebrew/bin/python3
 
 ## Development
 
+Before touching UI code, read [docs/design-language.md](./docs/design-language.md) — it documents the visual grammar, information density heuristics, and explicit "won't do" boundaries. PRs can be reviewed by citing specific `§N.M` sections.
+
 ```bash
 git clone https://github.com/npxcnency-ux/pi-trace-extension
 cd pi-trace-extension

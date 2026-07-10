@@ -255,6 +255,8 @@ export PI_TRACE_PYTHON=/opt/homebrew/bin/python3
 
 ## 开发
 
+改 UI 前先读 [docs/design-language.md](./docs/design-language.md)——里面沉淀了视觉语法、信息密度取舍、明确不做的方向。PR 评审可按 `§N.M` 引用具体条款。
+
 ```bash
 git clone https://github.com/npxcnency-ux/pi-trace-extension
 cd pi-trace-extension

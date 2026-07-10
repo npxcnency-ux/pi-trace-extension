@@ -33,6 +33,17 @@
 - **无网络调用**：任何新增网络请求必须默认关闭 + README 明确说明
 - **附加式演进**：新事件类型对老 viewer 必须降级友好
 - **构建产物 `viewer/assets.json` 提交到仓库**：终端用户不跑 build.py
+- **Fail-open 姿态**：pi.on handler **必须**过 `safeHandler` 包裹；任何 I/O 异常走 `markDisabled` 单向门，绝不让 pi 崩。详见 `extensions/trace/index.ts` 顶部的 Fail-open 基础设施段
+
+## UI 决策规则
+
+详见 [docs/design-language.md](docs/design-language.md)——规则 + 为什么都在那儿，PR 里可以按 `§N.M` 引用具体条款。
+
+**加新事件类型 / UI 组件前必读**：
+- §2 · 六大原则（尤其 Fail-open first / Additive only）
+- §3 · 视觉语法（色板、图标、数字格式）
+- §4 · 信息密度三档（决定新数据放树/详情/dashboard 的判断 heuristic）
+- §5 · 不做 X（明确拒绝的方向，别浪费时间做）
 
 ## 常用命令
 
