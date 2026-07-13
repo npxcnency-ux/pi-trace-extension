@@ -80,7 +80,15 @@ python3 ~/.pi/agent/npm/pi-trace-extension/extensions/trace/trace_to_html.py [se
 # 不传参数则渲染最新一个
 ```
 
-**跨会话 dashboard** —— 磁盘上所有 session 的顶层索引：
+**跨会话 dashboard** —— 磁盘上所有 session 的顶层索引。
+
+在 pi 会话里输入：
+
+```
+/trace all
+```
+
+或从 shell：
 
 ```bash
 python3 ~/.pi/agent/npm/pi-trace-extension/extensions/trace/trace_to_html.py --dashboard

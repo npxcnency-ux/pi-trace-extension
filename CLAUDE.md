@@ -58,6 +58,10 @@ python3 extensions/trace/trace_to_html.py [<session-id>]
 python3 extensions/trace/trace_to_html.py --dashboard
 ```
 
+pi 会话内 slash 命令（等价于上面 CLI）：
+- `/trace` — 当前 session 的 trace.html
+- `/trace all` — 跨会话 dashboard
+
 ## 发版规范（历史约定）
 
 - dev commit 不改 version

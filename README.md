@@ -80,7 +80,15 @@ python3 ~/.pi/agent/npm/pi-trace-extension/extensions/trace/trace_to_html.py [se
 # Omit the argument to pick the most recent session
 ```
 
-**Cross-session dashboard** — a top-level index of every session on disk:
+**Cross-session dashboard** — a top-level index of every session on disk.
+
+Inside a pi session, run:
+
+```
+/trace all
+```
+
+Or from the shell:
 
 ```bash
 python3 ~/.pi/agent/npm/pi-trace-extension/extensions/trace/trace_to_html.py --dashboard

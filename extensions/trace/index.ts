@@ -481,6 +481,29 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
+	// 跨会话 dashboard：spawn python3 trace_to_html.py --dashboard
+	// 与 renderHtml 对称，扫描 ~/.pi/agent/traces/ 下所有 session 生成 index.html
+	const renderDashboard = (opts: { open: boolean; sync?: boolean }): { ok: boolean; output?: string; error?: string } => {
+		if (!fs.existsSync(PYTHON_SCRIPT)) {
+			return { ok: false, error: `trace_to_html.py not found at ${PYTHON_SCRIPT}` };
+		}
+		const args = [PYTHON_SCRIPT, "--dashboard"];
+		try {
+			if (opts.sync) {
+				const r = spawnSync(PYTHON_BIN, args, { encoding: "utf-8", timeout: 30000 });
+				if (r.status !== 0) return { ok: false, error: r.stderr || r.stdout || `exit ${r.status}` };
+			} else {
+				const child = spawn(PYTHON_BIN, args, { stdio: "ignore", detached: true });
+				child.unref();
+			}
+			const output = path.join(TRACE_DIR, "index.html");
+			if (opts.open) openInBrowser(output);
+			return { ok: true, output };
+		} catch (err: any) {
+			return { ok: false, error: err?.message || String(err) };
+		}
+	};
+
 	const openInBrowser = (filePath: string) => {
 		const platform = process.platform;
 		const cmd = platform === "darwin" ? "open"
@@ -494,12 +517,23 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	// /trace 命令：立刻渲染并打开
+	//   /trace       → 当前 session 的 trace.html
+	//   /trace all   → 跨会话 dashboard（~/.pi/agent/traces/index.html）
 	pi.registerCommand("trace", {
-		description: "Render this session's events.jsonl into trace.html and open it in browser",
-		handler: async (_args, ctx) => {
-			const r = renderHtml({ open: true, sync: true });
-			if (r.ok) ctx.ui.notify(`✓ trace.html → ${r.output}`, "info");
-			else ctx.ui.notify(`✗ trace render failed: ${r.error}`, "error");
+		description: "Render trace.html for this session, or /trace all for the cross-session dashboard",
+		handler: async (args, ctx) => {
+			const sub = (args || "").trim().toLowerCase();
+			if (sub === "") {
+				const r = renderHtml({ open: true, sync: true });
+				if (r.ok) ctx.ui.notify(`✓ trace.html → ${r.output}`, "info");
+				else ctx.ui.notify(`✗ trace render failed: ${r.error}`, "error");
+			} else if (sub === "all") {
+				const r = renderDashboard({ open: true, sync: true });
+				if (r.ok) ctx.ui.notify(`✓ dashboard → ${r.output}`, "info");
+				else ctx.ui.notify(`✗ dashboard render failed: ${r.error}`, "error");
+			} else {
+				ctx.ui.notify("Usage: /trace [all]", "info");
+			}
 		},
 	});
 
