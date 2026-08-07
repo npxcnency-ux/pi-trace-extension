@@ -856,7 +856,7 @@ def extract_summary(session_dir: Path):
     total_cost = 0.0
     models = set()
     try:
-        with open(ev_file) as f:
+        with open(ev_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line: continue
@@ -1017,7 +1017,7 @@ def main():
         print(f"events.jsonl not found in {session}"); sys.exit(1)
 
     events = []
-    with open(events_file) as f:
+    with open(events_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line: continue
@@ -1081,13 +1081,14 @@ ASSETS_DASH_HTML = ""
 try:
     _assets = (_HERE / "viewer" / "assets.json")
     if _assets.exists():
-        _a = json.loads(_assets.read_text())
+        _a = json.loads(_assets.read_text(encoding="utf-8"))
         ASSETS_CSS = _a["css"]; ASSETS_JS = _a["js"]; HTML_TPL = _a["html"]
         ASSETS_DASH_CSS = _a.get("dash_css", "")
         ASSETS_DASH_JS = _a.get("dash_js", "")
         ASSETS_DASH_HTML = _a.get("dash_html", "")
-except Exception:
-    pass
+except Exception as e:
+    # 文件在却加载失败（如编码错误）——别静默吞，否则会误导用户去跑 build.py
+    print(f"failed to load {_assets}: {type(e).__name__}: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     if not ASSETS_CSS or not ASSETS_JS or not HTML_TPL:
