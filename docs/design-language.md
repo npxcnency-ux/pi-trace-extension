@@ -29,6 +29,8 @@
 ### §2.1 · Fail-open first
 宿主 pi 稳定性 > 本扩展数据完整性。任何 I/O 异常、任何 handler 抛错，扩展进入 `disabled` 单向门，静默丢事件，pi 主进程不受影响。**永远不能因为 trace 让 pi 崩**。
 
+**但 fail-open ≠ 静默吞异常。** 这条只约束 `pi.on` handler 那条**宿主链路**——那里"别崩"压倒一切。离线工具脚本（`trace_to_html.py` / `build.py`）不在宿主进程里，崩了也伤不到 pi，它们的异常**必须暴露真实错误**，绝不能 `except: pass` 吞掉后抛一个误导性兜底信息。反例见 [#1](https://github.com/npxcnency-ux/pi-trace-extension/issues/1)：`assets.json` 读取因 Windows 编码抛 `UnicodeDecodeError` 被静默吞，伪装成"文件缺失"，用户反复 `build.py`、挪文件都无解，因为真正的错被藏起来了。判断法：**这段代码崩了会不会连累 pi？不会 → 让它把真实异常喊出来。**
+
 ### §2.2 · Local-first
 无网络调用。用户 prompt、tool args、tool 输出、模型响应全部只写本地磁盘。任何新增网络请求必须默认关闭且 README 明确说明。
 
