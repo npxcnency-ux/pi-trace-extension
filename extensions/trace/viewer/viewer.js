@@ -10,11 +10,11 @@ function fmtMoney(x) {
 }
 function fmtInt(n) { if (n == null) return "0"; return Number(n).toLocaleString(); }
 // 缓存命中率 = cacheRead / 总输入(input+cacheRead+cacheWrite)。cacheWrite 是 miss，计入分母。
-// 纯输入侧指标（输出永远现场生成，无缓存概念）。零命中或无输入返回 null → 不显示 badge。
+// 纯输入侧指标（输出永远现场生成，无缓存概念）。零命中显示 0%（表示查过没命中）；无输入数据才返回 null。
 function cacheHitRate(u) {
   if (!u) return null;
   const denom = (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
-  if (!denom || !u.cacheRead) return null;
+  if (!denom) return null;
   return (u.cacheRead / denom) * 100;
 }
 function fmtIso(ms) { if (!ms) return ""; const d = new Date(ms); const p=(n,w)=>String(n).padStart(w||2,"0"); return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())+"."+p(d.getMilliseconds(),3); }
