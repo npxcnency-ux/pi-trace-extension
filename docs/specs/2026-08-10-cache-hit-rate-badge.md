@@ -30,11 +30,11 @@
    ```js
    function cacheHitRate(u) {
      const denom = (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
-     if (!denom || !u.cacheRead) return null;  // 无输入或零命中不显示
+     if (!denom) return null;  // 仅无输入数据时不显示
      return (u.cacheRead / denom) * 100;
    }
    ```
-   返回 `null` 时不加 badge(遵循 §2.6 Silence when healthy——没缓存的请求不该冒出个 0%)。
+   返回 `null` 时不加 badge(仅异常空 usage 才发生)。零命中显示 `0.0%`——冷启动/无缓存轮次明确"查过没命中",避免用户误以为功能没生效。
 
 2. 三处详情页,在 `cacheRead` badge 之后、`model` badge 之前插入:
    ```js
@@ -54,10 +54,10 @@
 3. Playwright headless 打开,点 interaction/turn/step 节点,确认:
    - badge 行出现 `cacheHit: XX.X%`,位置在 model badge 前
    - 命中率数值 = cacheRead/(input+cacheRead+cacheWrite),手算核对一条
-4. 找一条首轮全 cacheWrite 的 step(cacheRead=0)→ 确认**不显示** cacheHit badge
+4. 找一条首轮 cacheRead=0 的 interaction → 确认显示 **`cacheHit: 0.0%`**(不隐藏)
 
 ## 边界情况
 
-- `cacheRead=0`(纯首轮/无缓存)→ 不显示 badge,避免噪音
+- `cacheRead=0`(纯首轮/无缓存)→ 显示 `cacheHit: 0.0%`,表示"查过没命中"
 - `input+cacheRead+cacheWrite=0`(异常空 usage)→ denom 为 0,返回 null 不显示
 - 老 viewer 兼容:纯新增 badge,不动现有字段,老数据无 cacheWrite 时 `|| 0` 兜底,降级为 `cacheRead/(input+cacheRead)`
