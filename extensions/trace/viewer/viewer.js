@@ -9,6 +9,14 @@ function fmtMoney(x) {
   return "$"+x.toFixed(3);
 }
 function fmtInt(n) { if (n == null) return "0"; return Number(n).toLocaleString(); }
+// 缓存命中率 = cacheRead / 总输入(input+cacheRead+cacheWrite)。cacheWrite 是 miss，计入分母。
+// 纯输入侧指标（输出永远现场生成，无缓存概念）。零命中或无输入返回 null → 不显示 badge。
+function cacheHitRate(u) {
+  if (!u) return null;
+  const denom = (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
+  if (!denom || !u.cacheRead) return null;
+  return (u.cacheRead / denom) * 100;
+}
 function fmtIso(ms) { if (!ms) return ""; const d = new Date(ms); const p=(n,w)=>String(n).padStart(w||2,"0"); return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())+"."+p(d.getMilliseconds(),3); }
 
 function setText(el, s) { el.textContent = s == null ? "" : String(s); }
@@ -304,6 +312,7 @@ function renderDetail(node) {
     const u = node.data.usage || {};
     if (u.input || u.output) addBadge(null, fmtInt(u.input) + " prompt → " + fmtInt(u.output) + " completion");
     if (u.cacheRead) addBadge("cacheRead", fmtInt(u.cacheRead));
+    { const hr = cacheHitRate(u); if (hr != null) addBadge("cacheHit", hr.toFixed(1) + "%"); }
     if (u.cost) addBadge("cost", fmtMoney(u.cost));
   } else if (t === "step") {
     const d = node.data;
@@ -312,6 +321,7 @@ function renderDetail(node) {
     const u = d.usage || {};
     if (u.input != null) addBadge(null, fmtInt(u.input) + " prompt → " + fmtInt(u.output||0) + " completion (Σ " + fmtInt((u.input||0)+(u.cacheRead||0)+(u.output||0)) + ")");
     if (u.cacheRead) addBadge("cacheRead", fmtInt(u.cacheRead));
+    { const hr = cacheHitRate(u); if (hr != null) addBadge("cacheHit", hr.toFixed(1) + "%"); }
     if (u.cost) addBadge("cost", fmtMoney(u.cost));
     if (d.stopReason) addBadge("stop", d.stopReason);
     if (d.model) addBadge(null, d.model, "badge-model");
@@ -324,6 +334,7 @@ function renderDetail(node) {
     const u = node.data.totalUsage || {};
     if (u.input || u.output) addBadge(null, fmtInt(u.input) + " prompt → " + fmtInt(u.output) + " completion");
     if (u.cacheRead) addBadge("cacheRead", fmtInt(u.cacheRead));
+    { const hr = cacheHitRate(u); if (hr != null) addBadge("cacheHit", hr.toFixed(1) + "%"); }
     if (u.cost) addBadge("cost", fmtMoney(u.cost));
     if (node.data.model) addBadge(null, node.data.model, "badge-model");
     if (node.data.slashCommand) addBadge(null, "/" + node.data.slashCommand, "badge-model");
