@@ -61,3 +61,13 @@
 - `cacheRead=0`(纯首轮/无缓存)→ 显示 `cacheHit: 0.0%`,表示"查过没命中"
 - `input+cacheRead+cacheWrite=0`(异常空 usage)→ denom 为 0,返回 null 不显示
 - 老 viewer 兼容:纯新增 badge,不动现有字段,老数据无 cacheWrite 时 `|| 0` 兜底,降级为 `cacheRead/(input+cacheRead)`
+
+## 演进 · 2026-08-11 · cacheWrite badge + 命中率 hover
+
+**动机**:用户看到某步命中率 81.9% 明显低于相邻步(94%/98%),困惑原因。真因是那步 `cacheWrite` 暴增(大工具结果/长输出首次进上下文,计入分母的 miss),但 `cacheWrite` 之前从不显示——稀释命中率的关键变量对用户不可见。
+
+**改动**:
+1. 三处详情页在 `cacheRead` badge 后加 `cacheWrite` badge(仅 `cacheWrite>0` 显示)。
+2. `makeBadge`/`addBadge` 加可选 `title` 参数;`cacheHit` badge hover 展开完整口径带实际数字:`cacheRead / (input + cacheRead + cacheWrite) = 实际除式`,并说明 cacheWrite 会拉低命中率。
+
+**要点**:命中率非单调递增是正常现象——cacheRead 随对话变长单调涨,但 cacheWrite 每步波动(取决于该步引入多少新 token),后者一大命中率就被稀释。这不是缓存复用退化,而是"这步产出了新上下文"的信号。
