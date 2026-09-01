@@ -682,10 +682,220 @@ function renderDag() {
   });
 }
 
+// ── 工具调用失败分析 ──────────────────────────────────────────
+// 规则分类：按错误文本首次命中归类，顺序即优先级（特征强的在前）。
+// 新增类别只加一行。见 docs/specs/2026-09-01-tool-failure-analysis.md。
+const FAIL_RULES = [
+  { key: "param_schema",  label: "参数格式错", side: "model",
+    test: s => /Validation failed for tool/i.test(s) },
+  { key: "edit_mismatch", label: "前置不匹配", side: "model",
+    test: s => /Could not find[\s\S]*old\s?text/i.test(s) || /must match exactly/i.test(s) || /replacement produced identical/i.test(s) || /No changes made/i.test(s) },
+  { key: "not_found",     label: "文件/路径缺失", side: "env",
+    test: s => /No such file or directory/i.test(s) || /EISDIR/i.test(s) || /beyond end of file/i.test(s) || /command not found/i.test(s) },
+  { key: "dep_missing",   label: "依赖缺失", side: "env",
+    test: s => /ModuleNotFoundError/i.test(s) || /ImportError/i.test(s) || /No module named/i.test(s) },
+  { key: "timeout",       label: "超时", side: "env",
+    test: s => /timed out/i.test(s) || /curl: \(28\)/i.test(s) },
+  { key: "permission",    label: "权限/拒绝", side: "env",
+    test: s => /Permission denied/i.test(s) || /EACCES/i.test(s) || /not permitted/i.test(s) },
+  { key: "script_error",  label: "脚本异常", side: "target",
+    test: s => /Traceback \(most recent call last\)/i.test(s) || /SyntaxError/i.test(s) || /\bError:/.test(s) },
+  { key: "nonzero_exit",  label: "非零退出", side: "target",
+    test: s => /exited with code/i.test(s) },
+];
+const FAIL_OTHER = { key: "other", label: "其他/需人工", side: "other" };
+
+// resultPreview 是 JSON 串 {"content":[{"type":"text","text":"…"}],…}；解析出纯文本。
+function parseErrText(resultPreview) {
+  if (!resultPreview) return "";
+  if (typeof resultPreview !== "string") return String(resultPreview);
+  try {
+    const o = JSON.parse(resultPreview);
+    if (o && Array.isArray(o.content)) {
+      const t = o.content.filter(c => c && c.text).map(c => c.text).join(" ").trim();
+      if (t) return t;
+    }
+  } catch (_) { /* 非 JSON，退回原串 */ }
+  return resultPreview;
+}
+
+function classifyFailure(errText) {
+  if (!errText) return FAIL_OTHER;
+  for (const r of FAIL_RULES) { if (r.test(errText)) return r; }
+  return FAIL_OTHER;
+}
+
+// DFS 遍历整棵树（含 subagent 子树），聚合失败工具。
+function collectToolFailures(root) {
+  const byTool = new Map();
+  (function visit(n) {
+    if (!n) return;
+    if (n.type === "tool" && n.status === "error") {
+      const d = n.data || {};
+      const name = d.toolName || n.name || "?";
+      const errText = parseErrText(d.resultPreview);
+      const cat = classifyFailure(errText);
+      if (!byTool.has(name)) byTool.set(name, { toolName: name, icon: n.icon || "🔧", count: 0, items: [] });
+      const g = byTool.get(name);
+      g.count += 1;
+      g.items.push({ nodeId: n.id, errText, category: cat });
+    }
+    if (n.children) n.children.forEach(visit);
+  })(root);
+  return Array.from(byTool.values()).sort((a, b) => b.count - a.count);
+}
+
+function renderToolFailures() {
+  const box = document.getElementById("fail-list");
+  if (!box) return;
+  box.innerHTML = "";
+  const groups = collectToolFailures(TRACE_DATA);
+  if (groups.length === 0) {
+    const empty = el("div", "fail-empty", "✓ 无工具失败");
+    box.appendChild(empty);
+    return;
+  }
+  groups.forEach(g => {
+    const tool = el("div", "fail-tool collapsed");
+    if (g.icon) { const i = el("span"); setText(i, g.icon); tool.appendChild(i); }
+    const nm = el("code"); setText(nm, g.toolName); tool.appendChild(nm);
+    const cnt = el("span", "fail-tool-count"); setText(cnt, "✕" + g.count); tool.appendChild(cnt);
+    const tog = el("span", "fail-tool-toggle"); setText(tog, "▸"); tool.appendChild(tog);
+
+    const items = el("div", "fail-items hidden");
+    g.items.forEach(it => {
+      const row = el("div", "fail-item");
+      const tag = el("span", "fail-tag side-" + it.category.side);
+      setText(tag, it.category.label);
+      row.appendChild(tag);
+      const msg = el("span", "fail-msg");
+      setText(msg, it.errText ? it.errText.replace(/\s+/g, " ").slice(0, 120) : "（无错误详情）");
+      msg.title = it.errText || "";
+      row.appendChild(msg);
+      const jump = el("span", "fail-jump", "↗");
+      jump.title = "跳转到该节点";
+      jump.addEventListener("click", (e) => { e.stopPropagation(); selectNode(it.nodeId); });
+      row.appendChild(jump);
+      items.appendChild(row);
+    });
+
+    tool.addEventListener("click", () => {
+      const open = tool.classList.toggle("collapsed");
+      items.classList.toggle("hidden");
+      setText(tog, tool.classList.contains("collapsed") ? "▸" : "▾");
+    });
+
+    box.appendChild(tool);
+    box.appendChild(items);
+  });
+}
+
+// ── 左侧三块可拖动分隔 ────────────────────────────────────────
+// 布局：tree-list(弹性) │resizer-dag│ dag-pane │resizer-fail│ fail-pane
+// resizer-dag：改 dag 高度，tree-list 吸收剩余。
+// resizer-fail：dag 与 fail 此消彼长，tree-list 不变。
+// 高度存 localStorage，跨 trace.html 复用。
+const PANE_MIN = 60;           // 单块最小高度 px
+const TREE_MIN = 80;           // 树至少保留
+const LS_KEY = "pi-trace-pane-h";
+
+function paneH(varName, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(varName);
+  const n = parseInt(v, 10);
+  return isNaN(n) ? fallback : n;
+}
+function setPaneH(dag, fail) {
+  document.documentElement.style.setProperty("--dag-h", dag + "px");
+  document.documentElement.style.setProperty("--fail-h", fail + "px");
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ dag, fail })); } catch (_) {}
+}
+
+function initPaneResizers() {
+  const treePane = document.querySelector(".tree-pane");
+  const treeList = document.getElementById("tree-list");
+  const dagPane = document.getElementById("dag-pane");
+  const failPane = document.getElementById("fail-pane");
+  const rDag = document.getElementById("resizer-dag");
+  const rFail = document.getElementById("resizer-fail");
+  if (!treePane || !dagPane || !failPane || !rDag || !rFail) return;
+
+  // 可用总高度（树 + dag + fail 三者共享，不含两根 resizer）
+  function budget() {
+    return treePane.clientHeight - rDag.offsetHeight - rFail.offsetHeight;
+  }
+
+  // 恢复存储的高度；无存储则按默认比例 tree:dag:fail = 2:1:1
+  let restored = false;
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_KEY) || "null");
+    if (saved && saved.dag > 0 && saved.fail > 0) { setPaneH(saved.dag, saved.fail); restored = true; }
+  } catch (_) {}
+  if (!restored) {
+    // 按比例 tree:dag:fail = 2:1:1。tree-list 实际可用 = tree-pane 高 − 固定块(search/toolbar) − 两 resizer − dag − fail。
+    // 令 tree = 2k、dag = fail = k，则 dag = fail = (可分配总高)/4。
+    const fixed = Array.from(treePane.children)
+      .filter(c => c !== treeList && c !== dagPane && c !== failPane && c !== rDag && c !== rFail)
+      .reduce((s, c) => s + c.offsetHeight, 0);
+    const alloc = treePane.clientHeight - fixed - rDag.offsetHeight - rFail.offsetHeight;
+    if (alloc > 0) {
+      const quarter = Math.round(alloc / 4);              // dag、fail 各 1/4，tree-list 得 2/4
+      document.documentElement.style.setProperty("--dag-h", quarter + "px");
+      document.documentElement.style.setProperty("--fail-h", quarter + "px");
+    }
+  }
+
+  // resizer-dag：向上拖 = dag 变高、tree 变矮（与 resizer-fail 方向一致：拖动使下方 pane 扩张）
+  function dragDag(startY, startDag) {
+    return (y) => {
+      const total = budget();
+      const fail = paneH("--fail-h", failPane.clientHeight);
+      const maxDag = total - TREE_MIN - fail;              // 保证 tree ≥ TREE_MIN
+      let dag = startDag - (y - startY);
+      dag = Math.max(PANE_MIN, Math.min(dag, Math.max(PANE_MIN, maxDag)));
+      setPaneH(dag, fail);
+    };
+  }
+
+  // resizer-fail：向下拖 = fail 变矮、dag 变高（此消彼长，tree 不变）
+  function dragFail(startY, startDag, startFail) {
+    return (y) => {
+      const sum = startDag + startFail;                    // 两块高度之和守恒
+      let dag = startDag + (y - startY);
+      dag = Math.max(PANE_MIN, Math.min(dag, sum - PANE_MIN));
+      setPaneH(dag, sum - dag);
+    };
+  }
+
+  function attach(resizer, makeMove) {
+    resizer.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const move = makeMove(e.clientY);
+      resizer.classList.add("dragging");
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "row-resize";
+      const onMove = (ev) => move(ev.clientY);
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        resizer.classList.remove("dragging");
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
+  attach(rDag, (startY) => dragDag(startY, paneH("--dag-h", dagPane.clientHeight)));
+  attach(rFail, (startY) => dragFail(startY, paneH("--dag-h", dagPane.clientHeight), paneH("--fail-h", failPane.clientHeight)));
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   const treeEl = document.getElementById("tree-list");
   treeEl.appendChild(renderNodeRow(TRACE_DATA, 0));
   renderDag();
+  renderToolFailures();
+  initPaneResizers();
 
   document.getElementById("tree-search").addEventListener("input", (e) => applySearch(e.target.value));
   document.getElementById("expand-all").addEventListener("click", () => {

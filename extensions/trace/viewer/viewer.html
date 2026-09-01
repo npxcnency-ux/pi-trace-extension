@@ -27,9 +27,15 @@
       <button id="only-errors">❌ 只看错误</button>
     </div>
     <div class="tree-list" id="tree-list"></div>
-    <div class="dag-pane">
+    <div class="pane-resizer" id="resizer-dag" title="拖动调整高度"></div>
+    <div class="dag-pane" id="dag-pane">
       <div class="dag-title">节点统计 (ok / total)</div>
       <div class="dag-grid" id="dag-grid"></div>
+    </div>
+    <div class="pane-resizer" id="resizer-fail" title="拖动调整高度"></div>
+    <div class="fail-pane" id="fail-pane">
+      <div class="fail-title">工具调用失败分析</div>
+      <div class="fail-list" id="fail-list"></div>
     </div>
   </div>
   <div class="detail-pane" id="detail-pane">
